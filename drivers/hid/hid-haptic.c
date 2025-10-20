@@ -10,9 +10,6 @@
 
 #include "hid-haptic.h"
 
-MODULE_DESCRIPTION("HID haptic touchpad support");
-MODULE_LICENSE("GPL");
-
 void hid_haptic_feature_mapping(struct hid_device *hdev,
 				struct hid_haptic_device *haptic,
 				struct hid_field *field, struct hid_usage *usage)
