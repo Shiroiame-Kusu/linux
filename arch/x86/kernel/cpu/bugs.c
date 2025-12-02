@@ -230,6 +230,9 @@ static void x86_amd_ssb_disable(void)
 		wrmsrq(MSR_AMD64_LS_CFG, msrval);
 }
 
+DEFINE_STATIC_CALL_NULL(vmscape_predictor_flush, write_ibpb);
+EXPORT_STATIC_CALL_GPL(vmscape_predictor_flush);
+
 #undef pr_fmt
 #define pr_fmt(fmt)	"MDS: " fmt
 
@@ -3130,7 +3133,7 @@ static void __init vmscape_update_mitigation(void)
 static void __init vmscape_apply_mitigation(void)
 {
 	if (vmscape_mitigation == VMSCAPE_MITIGATION_IBPB_EXIT_TO_USER)
-		setup_force_cpu_cap(X86_FEATURE_IBPB_EXIT_TO_USER);
+		static_call_update(vmscape_predictor_flush, write_ibpb);
 }
 
 #undef pr_fmt
