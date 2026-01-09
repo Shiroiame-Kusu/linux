@@ -4,9 +4,13 @@
 # x86 Platform-Specific Drivers
 #
 
+# ACPI calls
+
 # Windows Management Interface
 obj-$(CONFIG_ACPI_WMI)		+= wmi.o
 obj-$(CONFIG_WMI_BMOF)		+= wmi-bmof.o
+
+obj-$(CONFIG_ACPI_CALL)		+= acpi_call.o
 
 # WMI drivers
 obj-$(CONFIG_HUAWEI_WMI)		+= huawei-wmi.o
@@ -33,6 +37,7 @@ obj-$(CONFIG_APPLE_GMUX)	+= apple-gmux.o
 # ASUS
 obj-$(CONFIG_ASUS_LAPTOP)	+= asus-laptop.o
 obj-$(CONFIG_ASUS_WIRELESS)	+= asus-wireless.o
+obj-$(CONFIG_ASUS_ARMOURY)	+= asus-armoury.o
 obj-$(CONFIG_ASUS_WMI)		+= asus-wmi.o
 obj-$(CONFIG_ASUS_NB_WMI)	+= asus-nb-wmi.o
 obj-$(CONFIG_ASUS_TF103C_DOCK)	+= asus-tf103c-dock.o
