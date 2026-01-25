@@ -577,7 +577,7 @@ CCAS = clang
 CCASDEPMODE = depmode=gcc3
 CCASFLAGS = -g -O2
 CCDEPMODE = depmode=gcc3
-CFGOPTS = --with-linux=/home/hakuu/Documents/GitHub/linux-cachy/ --with-linux-obj=/home/hakuu/Documents/GitHub/linux-cachy/ --enable-linux-builtin=yes
+CFGOPTS = --with-linux=/home/hakuu/linux-6.18.7 --with-linux-obj=/home/hakuu/linux-6.18.7 --enable-linux-builtin=yes
 CFLAGS = -g -O2
 CHECKBASHISMS = 
 CODE_COVERAGE_CFLAGS = 
@@ -691,10 +691,10 @@ LIBUNWIND_PC = libunwind
 LIBUUID_CFLAGS = -I/usr/include/uuid
 LIBUUID_LIBS = -luuid
 LIBUUID_PC = uuid
-LINUX = /home/hakuu/Documents/GitHub/linux-cachy/
-LINUX_OBJ = /home/hakuu/Documents/GitHub/linux-cachy/
+LINUX = /home/hakuu/linux-6.18.7
+LINUX_OBJ = /home/hakuu/linux-6.18.7
 LINUX_SYMBOLS = NONE
-LINUX_VERSION = 6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty
+LINUX_VERSION = 6.18.7
 LIPO = 
 LN_S = ln -s
 LTLIBICONV = -liconv

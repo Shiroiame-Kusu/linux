@@ -53,7 +53,7 @@ FMAKE = env -u MAKEFLAGS make $(FMAKEFLAGS)
 modules-Linux:
 	mkdir -p $(sort $(dir $(spl-objs) $(spl-)))
 	mkdir -p $(sort $(dir $(zfs-objs) $(zfs-)))
-	$(MAKE) -C /home/hakuu/Documents/GitHub/linux-cachy/ $(if ,CC=) \
+	$(MAKE) -C /home/hakuu/linux-6.18.7 $(if ,CC=) \
 		$(if ,LD=) $(if ,LLVM=) \
 		$(if ,CROSS_COMPILE=) \
 		$(if ,ARCH=) \
@@ -71,7 +71,7 @@ modules: modules-Linux
 clean-Linux:
 	@# Only cleanup the kernel build directories when CONFIG_KERNEL
 	@# is defined.  This indicates that kernel modules should be built.
-#	$(MAKE) -C /home/hakuu/Documents/GitHub/linux-cachy/ M="$$PWD"  clean
+#	$(MAKE) -C /home/hakuu/linux-6.18.7 M="$$PWD"  clean
 
 	$(RM) NONE Module.markers
 	find . -name '*.ur-safe' -type f -delete
@@ -85,14 +85,14 @@ clean: clean-Linux
 modules_uninstall-Linux-legacy:
 	$(RM) -r $(addprefix $(KMODDIR)/$(INSTALL_MOD_DIR)/,spl/ avl/ icp/ lua/ nvpair/ unicode/ zcommon/ zfs/ zstd/)
 
-KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty
+KMODDIR := $(INSTALL_MOD_PATH)/lib/modules/6.18.7
 modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Install the kernel modules
-	$(MAKE) -C /home/hakuu/Documents/GitHub/linux-cachy/ M="$$PWD" modules_install \
+	$(MAKE) -C /home/hakuu/linux-6.18.7 M="$$PWD" modules_install \
 		INSTALL_MOD_PATH=$(INSTALL_MOD_PATH) \
 		INSTALL_MOD_DIR=$(INSTALL_MOD_DIR) \
 		$(if ,ARCH=) \
-		KERNELRELEASE=6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty
+		KERNELRELEASE=6.18.7
 	@# Remove extraneous build products when packaging
 	if [ -n "$(DESTDIR)" ] && [ "$(DONT_DELETE_MODULES_FILES)" != "1" ]; then \
 		find $(KMODDIR) -name 'modules.*' -delete; \
@@ -103,11 +103,11 @@ modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Naturally, depmod is less than amused by this.
 	@# So if we find it missing or with one of these present,
 	@# we check for the alternate path for the System.map
-	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty; \
+	sysmap=$(INSTALL_MOD_PATH)/boot/System.map-6.18.7; \
 	{ [ -f "$$sysmap" ] && [ $$(wc -l < "$$sysmap") -ge 100 ]; } || \
-		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty; \
+		sysmap=$(INSTALL_MOD_PATH)/usr/lib/debug/boot/System.map-6.18.7; \
 	if [ -f $$sysmap ]; then \
-		depmod -ae -F $$sysmap 6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty -b $(INSTALL_MOD_PATH)/; \
+		depmod -ae -F $$sysmap 6.18.7 -b $(INSTALL_MOD_PATH)/; \
 	fi
 
 modules_install-FreeBSD:
@@ -117,8 +117,8 @@ modules_install-FreeBSD:
 modules_install: modules_install-Linux
 
 data_install-Linux:
-	@mkdir -p $(DESTDIR)//usr/local/src/zfs-2.4.0/6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty
-	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/local/src/zfs-2.4.0/6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty
+	@mkdir -p $(DESTDIR)//usr/local/src/zfs-2.4.0/6.18.7
+	cp ../zfs.release ../zfs_config.h NONE $(DESTDIR)//usr/local/src/zfs-2.4.0/6.18.7
 
 data_install-FreeBSD:
 	@
@@ -135,7 +135,7 @@ modules_uninstall-FreeBSD:
 modules_uninstall: modules_uninstall-Linux
 
 data_uninstall-Linux:
-	$(RM) $(addprefix $(DESTDIR)//usr/local/src/zfs-2.4.0/6.18.5-1-cachyos-hakuu-v1-flto-gd747bd431f2d-dirty/,zfs.release zfs_config.h NONE)
+	$(RM) $(addprefix $(DESTDIR)//usr/local/src/zfs-2.4.0/6.18.7/,zfs.release zfs_config.h NONE)
 
 data_uninstall-FreeBSD:
 	@
@@ -148,11 +148,11 @@ cppcheck-Linux:
 		--suppress=unmatchedSuppression \
 		--suppress=noValidConfiguration \
 		--enable=warning,information -D_KERNEL \
-		--include=/home/hakuu/Documents/GitHub/linux-cachy//include/generated/autoconf.h \
+		--include=/home/hakuu/linux-6.18.7/include/generated/autoconf.h \
 		--include=../zfs_config.h \
-		--config-exclude=/home/hakuu/Documents/GitHub/linux-cachy//include \
+		--config-exclude=/home/hakuu/linux-6.18.7/include \
 		-i zstd/lib \
-		-I /home/hakuu/Documents/GitHub/linux-cachy//include \
+		-I /home/hakuu/linux-6.18.7/include \
 		-I ../include/os/linux/kernel \
 		-I ../include/os/linux/spl \
 		-I ../include/os/linux/zfs \
