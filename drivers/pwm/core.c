@@ -1608,12 +1608,13 @@ void pwmchip_put(struct pwm_chip *chip)
 }
 EXPORT_SYMBOL_GPL(pwmchip_put);
 
-static void pwmchip_release(struct device *pwmchip_dev)
+void pwmchip_release(struct device *pwmchip_dev)
 {
 	struct pwm_chip *chip = pwmchip_from_dev(pwmchip_dev);
 
 	kfree(chip);
 }
+EXPORT_SYMBOL_GPL(pwmchip_release);
 
 struct pwm_chip *pwmchip_alloc(struct device *parent, unsigned int npwm, size_t sizeof_priv)
 {
@@ -2294,8 +2295,9 @@ static long pwm_cdev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				.duty_offset_ns = wf.duty_offset_ns,
 			};
 
-			return copy_to_user((struct pwmchip_waveform __user *)arg,
-					    &cwf, sizeof(cwf));
+			ret = copy_to_user((struct pwmchip_waveform __user *)arg,
+					   &cwf, sizeof(cwf));
+			return ret ? -EFAULT : 0;
 		}
 
 	case PWM_IOCTL_GETWF:
@@ -2328,8 +2330,9 @@ static long pwm_cdev_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 				.duty_offset_ns = wf.duty_offset_ns,
 			};
 
-			return copy_to_user((struct pwmchip_waveform __user *)arg,
-					    &cwf, sizeof(cwf));
+			ret = copy_to_user((struct pwmchip_waveform __user *)arg,
+					   &cwf, sizeof(cwf));
+			return ret ? -EFAULT : 0;
 		}
 
 	case PWM_IOCTL_SETROUNDEDWF:

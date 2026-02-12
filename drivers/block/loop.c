@@ -52,7 +52,7 @@ struct loop_device {
 	int		lo_flags;
 	char		lo_file_name[LO_NAME_SIZE];
 
-	struct file	*lo_backing_file, *lo_backing_virt_file;
+	struct file	*lo_backing_file;
 	unsigned int	lo_min_dio_size;
 	struct block_device *lo_device;
 
@@ -348,11 +348,10 @@ static int lo_rw_aio(struct loop_device *lo, struct loop_cmd *cmd,
 	struct file *file = lo->lo_backing_file;
 	struct bio_vec tmp;
 	unsigned int offset;
-	int nr_bvec = 0;
+	unsigned int nr_bvec;
 	int ret;
 
-	rq_for_each_bvec(tmp, rq, rq_iter)
-		nr_bvec++;
+	nr_bvec = blk_rq_nr_bvec(rq);
 
 	if (rq->bio != rq->biotail) {
 
@@ -439,15 +438,6 @@ static int do_req_filebacked(struct loop_device *lo, struct request *rq)
 		WARN_ON_ONCE(1);
 		return -EIO;
 	}
-}
-
-static struct file *loop_real_file(struct file *file)
-{
-	struct file *f = NULL;
-
-	if (file->f_path.dentry->d_sb->s_op->real_loop)
-		f = file->f_path.dentry->d_sb->s_op->real_loop(file);
-	return f;
 }
 
 static void loop_reread_partitions(struct loop_device *lo)
@@ -551,7 +541,6 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 {
 	struct file *file = fget(arg);
 	struct file *old_file;
-	struct file *f, *virt_file = NULL, *old_virt_file;
 	unsigned int memflags;
 	int error;
 	bool partscan;
@@ -582,19 +571,11 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	if (!(lo->lo_flags & LO_FLAGS_READ_ONLY))
 		goto out_err;
 
-	f = loop_real_file(file);
-	if (f) {
-		virt_file = file;
-		file = f;
-		get_file(file);
-	}
-
 	error = loop_validate_file(file, bdev);
 	if (error)
 		goto out_err;
 
 	old_file = lo->lo_backing_file;
-	old_virt_file = lo->lo_backing_virt_file;
 
 	error = -EINVAL;
 
@@ -614,7 +595,6 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	memflags = blk_mq_freeze_queue(lo->lo_queue);
 	mapping_set_gfp_mask(old_file->f_mapping, lo->old_gfp_mask);
 	loop_assign_backing_file(lo, file);
-	lo->lo_backing_virt_file = virt_file;
 	loop_update_dio(lo);
 	blk_mq_unfreeze_queue(lo->lo_queue, memflags);
 	partscan = lo->lo_flags & LO_FLAGS_PARTSCAN;
@@ -634,9 +614,6 @@ static int loop_change_fd(struct loop_device *lo, struct block_device *bdev,
 	 * dependency.
 	 */
 	fput(old_file);
-	if (old_virt_file)
-		fput(old_virt_file);
-
 	dev_set_uevent_suppress(disk_to_dev(lo->lo_disk), 0);
 	if (partscan)
 		loop_reread_partitions(lo);
@@ -650,32 +627,9 @@ out_err:
 	loop_global_unlock(lo, is_loop);
 out_putf:
 	fput(file);
-	if (virt_file)
-		fput(virt_file);
-
 	dev_set_uevent_suppress(disk_to_dev(lo->lo_disk), 0);
 	goto done;
 }
-
-/*
- * for AUFS
- * no get/put for file.
- */
-/* Just to make the compiler silence, declare it */
-struct file *loop_backing_file(struct super_block *sb);
-struct file *loop_backing_file(struct super_block *sb)
-{
-	struct file *ret;
-	struct loop_device *l;
-
-	ret = NULL;
-	if (MAJOR(sb->s_dev) == LOOP_MAJOR) {
-		l = sb->s_bdev->bd_disk->private_data;
-		ret = l->lo_backing_file;
-	}
-	return ret;
-}
-EXPORT_SYMBOL_GPL(loop_backing_file);
 
 /* loop sysfs attributes */
 
@@ -1030,7 +984,6 @@ static int loop_configure(struct loop_device *lo, blk_mode_t mode,
 			  const struct loop_config *config)
 {
 	struct file *file = fget(config->fd);
-	struct file *f, *virt_file = NULL;
 	struct queue_limits lim;
 	int error;
 	loff_t size;
@@ -1050,13 +1003,6 @@ static int loop_configure(struct loop_device *lo, blk_mode_t mode,
 
 	/* This is safe, since we have a reference from open(). */
 	__module_get(THIS_MODULE);
-
-	f = loop_real_file(file);
-	if (f) {
-		virt_file = file;
-		file = f;
-		get_file(file);
-	}
 
 	/*
 	 * If we don't hold exclusive handle for the device, upgrade to it
@@ -1112,7 +1058,6 @@ static int loop_configure(struct loop_device *lo, blk_mode_t mode,
 
 	lo->lo_device = bdev;
 	loop_assign_backing_file(lo, file);
-	lo->lo_backing_virt_file = virt_file;
 
 	lim = queue_limits_start_update(lo->lo_queue);
 	loop_update_limits(lo, &lim, config->block_size);
@@ -1137,7 +1082,7 @@ static int loop_configure(struct loop_device *lo, blk_mode_t mode,
 	/* Order wrt reading lo_state in loop_validate_file(). */
 	wmb();
 
-	lo->lo_state = Lo_bound;
+	WRITE_ONCE(lo->lo_state, Lo_bound);
 	if (part_shift)
 		lo->lo_flags |= LO_FLAGS_PARTSCAN;
 	partscan = lo->lo_flags & LO_FLAGS_PARTSCAN;
@@ -1163,8 +1108,6 @@ out_bdev:
 		bd_abort_claiming(bdev, loop_configure);
 out_putf:
 	fput(file);
-	if (virt_file)
-		fput(virt_file);
 	/* This is safe: open() is still holding a reference. */
 	module_put(THIS_MODULE);
 	return error;
@@ -1174,13 +1117,11 @@ static void __loop_clr_fd(struct loop_device *lo)
 {
 	struct queue_limits lim;
 	struct file *filp;
-	struct file *virt_filp = lo->lo_backing_virt_file;
 	gfp_t gfp = lo->old_gfp_mask;
 
 	spin_lock_irq(&lo->lo_lock);
 	filp = lo->lo_backing_file;
 	lo->lo_backing_file = NULL;
-	lo->lo_backing_virt_file = NULL;
 	spin_unlock_irq(&lo->lo_lock);
 
 	lo->lo_device = NULL;
@@ -1238,7 +1179,7 @@ static void __loop_clr_fd(struct loop_device *lo)
 	if (!part_shift)
 		set_bit(GD_SUPPRESS_PART_SCAN, &lo->lo_disk->state);
 	mutex_lock(&lo->lo_mutex);
-	lo->lo_state = Lo_unbound;
+	WRITE_ONCE(lo->lo_state, Lo_unbound);
 	mutex_unlock(&lo->lo_mutex);
 
 	/*
@@ -1247,8 +1188,6 @@ static void __loop_clr_fd(struct loop_device *lo)
 	 * fput can take open_mutex which is usually taken before lo_mutex.
 	 */
 	fput(filp);
-	if (virt_filp)
-		fput(virt_filp);
 }
 
 static int loop_clr_fd(struct loop_device *lo)
@@ -1279,7 +1218,7 @@ static int loop_clr_fd(struct loop_device *lo)
 
 	lo->lo_flags |= LO_FLAGS_AUTOCLEAR;
 	if (disk_openers(lo->lo_disk) == 1)
-		lo->lo_state = Lo_rundown;
+		WRITE_ONCE(lo->lo_state, Lo_rundown);
 	loop_global_unlock(lo, true);
 
 	return 0;
@@ -1804,7 +1743,7 @@ static void lo_release(struct gendisk *disk)
 
 	mutex_lock(&lo->lo_mutex);
 	if (lo->lo_state == Lo_bound && (lo->lo_flags & LO_FLAGS_AUTOCLEAR))
-		lo->lo_state = Lo_rundown;
+		WRITE_ONCE(lo->lo_state, Lo_rundown);
 
 	need_clear = (lo->lo_state == Lo_rundown);
 	mutex_unlock(&lo->lo_mutex);
@@ -1919,7 +1858,7 @@ static blk_status_t loop_queue_rq(struct blk_mq_hw_ctx *hctx,
 
 	blk_mq_start_request(rq);
 
-	if (lo->lo_state != Lo_bound)
+	if (data_race(READ_ONCE(lo->lo_state)) != Lo_bound)
 		return BLK_STS_IOERR;
 
 	switch (req_op(rq)) {
@@ -1967,6 +1906,10 @@ static void loop_handle_cmd(struct loop_cmd *cmd)
 		ret = -EIO;
 		goto failed;
 	}
+
+	/* We can block in this context, so ignore REQ_NOWAIT. */
+	if (rq->cmd_flags & REQ_NOWAIT)
+		rq->cmd_flags &= ~REQ_NOWAIT;
 
 	if (cmd_blkcg_css)
 		kthread_associate_blkcg(cmd_blkcg_css);
@@ -2073,7 +2016,7 @@ static int loop_add(int i)
 	lo->worker_tree = RB_ROOT;
 	INIT_LIST_HEAD(&lo->idle_worker_list);
 	timer_setup(&lo->timer, loop_free_idle_workers_timer, TIMER_DEFERRABLE);
-	lo->lo_state = Lo_unbound;
+	WRITE_ONCE(lo->lo_state, Lo_unbound);
 
 	err = mutex_lock_killable(&loop_ctl_mutex);
 	if (err)
@@ -2231,7 +2174,7 @@ static int loop_control_remove(int idx)
 		goto mark_visible;
 	}
 	/* Mark this loop device as no more bound, but not quite unbound yet */
-	lo->lo_state = Lo_deleting;
+	WRITE_ONCE(lo->lo_state, Lo_deleting);
 	mutex_unlock(&lo->lo_mutex);
 
 	loop_remove(lo);
@@ -2254,8 +2197,12 @@ static int loop_control_get_free(int idx)
 	if (ret)
 		return ret;
 	idr_for_each_entry(&loop_index_idr, lo, id) {
-		/* Hitting a race results in creating a new loop device which is harmless. */
-		if (lo->idr_visible && data_race(lo->lo_state) == Lo_unbound)
+		/*
+		 * Hitting a race results in creating a new loop device
+		 * which is harmless.
+		 */
+		if (lo->idr_visible &&
+		    data_race(READ_ONCE(lo->lo_state)) == Lo_unbound)
 			goto found;
 	}
 	mutex_unlock(&loop_ctl_mutex);

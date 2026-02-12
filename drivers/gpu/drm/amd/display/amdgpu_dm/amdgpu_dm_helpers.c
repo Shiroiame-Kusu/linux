@@ -131,6 +131,7 @@ enum dc_edid_status dm_helpers_parse_edid_caps(
 	edid_caps->serial_number = edid_buf->serial;
 	edid_caps->manufacture_week = edid_buf->mfg_week;
 	edid_caps->manufacture_year = edid_buf->mfg_year;
+	edid_caps->analog = !(edid_buf->input & DRM_EDID_INPUT_DIGITAL);
 
 	drm_edid_get_monitor_name(edid_buf,
 				  edid_caps->display_name,
@@ -142,6 +143,9 @@ enum dc_edid_status dm_helpers_parse_edid_caps(
 		edid_caps->fva = connector->display_info.hdmi.vrr_cap.fva;
 		edid_caps->hdmi_vrr = connector->display_info.hdmi.vrr_cap.supported;
 	}
+
+	if (edid_caps->edid_hdmi)
+		populate_hdmi_info_from_connector(&connector->display_info.hdmi, edid_caps);
 
 	apply_edid_quirks(dev, edid_buf, edid_caps);
 
@@ -992,6 +996,11 @@ dm_helpers_read_acpi_edid(struct amdgpu_dm_connector *aconnector)
 		return NULL;
 
 	return drm_edid_read_custom(connector, dm_helpers_probe_acpi_edid, connector);
+}
+
+void populate_hdmi_info_from_connector(struct drm_hdmi_info *hdmi, struct dc_edid_caps *edid_caps)
+{
+	edid_caps->scdc_present = hdmi->scdc.supported;
 }
 
 enum dc_edid_status dm_helpers_read_local_edid(

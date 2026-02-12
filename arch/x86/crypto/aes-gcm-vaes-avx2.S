@@ -233,7 +233,6 @@ SYM_FUNC_START(aes_gcm_precompute_vaes_avx2)
 	.set	H_CUR,		%ymm3
 	.set	H_CUR_XMM,	%xmm3
 	.set	H_CUR2,		%ymm4
-	.set	H_CUR2_XMM,	%xmm4
 	.set	H_INC,		%ymm5
 	.set	H_INC_XMM,	%xmm5
 	.set	GFPOLY,		%ymm6
@@ -578,7 +577,6 @@ SYM_FUNC_START(aes_gcm_aad_update_vaes_avx2)
 	cmp		$16, AADLEN
 	jle		.Laad_lastblock
 
-.Laad_last2blocks:
 	// Update GHASH with the remaining 17 <= AADLEN <= 31 bytes of AAD.
 	mov		AADLEN, AADLEN	// Zero-extend AADLEN to AADLEN64.
 	vmovdqu		(AAD), TMP0_XMM
@@ -634,7 +632,7 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 .endm
 
 // Generate and encrypt counter blocks in the given AESDATA vectors, excluding
-// the last AES round.  Clobbers TMP0.
+// the last AES round.  Clobbers %rax and TMP0.
 .macro	_aesenc_loop	vecs:vararg
 	_ctr_begin	\vecs
 	lea		16(KEY), %rax
@@ -689,7 +687,7 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 	.set	LE_CTR_PTR32,	%esi
 	.set	GHASH_ACC_PTR,	%rdx
 	.set	SRC,		%rcx	// Assumed to be %rcx.
-					// See .Ltail_xor_and_ghash_partial_vec
+					// See .Ltail_xor_and_ghash_1to16bytes
 	.set	DST,		%r8
 	.set	DATALEN,	%r9d
 	.set	DATALEN64,	%r9	// Zero-extend DATALEN before using!
@@ -736,7 +734,6 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 	.set	H_POW2_XORED,	%ymm7
 	.set	H_POW2_XORED_XMM, %xmm7
 	.set	H_POW1_XORED,	%ymm8
-	.set	H_POW1_XORED_XMM, %xmm8
 
 	// RNDKEY0 caches the zero-th round key, and RNDKEYLAST the last one.
 	.set	RNDKEY0,	%ymm9
@@ -751,9 +748,7 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 	.set	AESDATA1,	%ymm13
 	.set	AESDATA1_XMM,	%xmm13
 	.set	AESDATA2,	%ymm14
-	.set	AESDATA2_XMM,	%xmm14
 	.set	AESDATA3,	%ymm15
-	.set	AESDATA3_XMM,	%xmm15
 
 .if \enc
 	.set	GHASHDATA_PTR,	DST
@@ -1128,6 +1123,7 @@ SYM_FUNC_END(aes_gcm_aad_update_vaes_avx2)
 	lea		.Lselect_high_bytes_table(%rip), %rax
 	vmovdqu		(%rax, TAGLEN64), %xmm1
 	vpshufb		BSWAP_MASK, %xmm1, %xmm1 // select low bytes, not high
+	xor		%eax, %eax
 	vptest		%xmm1, %xmm0
 	sete		%al
 .endif

@@ -9,6 +9,7 @@
 
 #include <linux/device.h>
 #include <linux/err.h>
+#include <linux/if_hsr.h>
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
@@ -157,7 +158,7 @@ unsigned int dsa_bridge_num_get(const struct net_device *bridge_dev, int max)
 		bridge_num = find_next_zero_bit(&dsa_fwd_offloading_bridges,
 						DSA_MAX_NUM_OFFLOADING_BRIDGES,
 						1);
-		if (bridge_num >= max)
+		if (bridge_num > max)
 			return 0;
 
 		set_bit(bridge_num, &dsa_fwd_offloading_bridges);
@@ -1768,6 +1769,70 @@ bool dsa_mdb_present_in_other_db(struct dsa_switch *ds, int port,
 	return false;
 }
 EXPORT_SYMBOL_GPL(dsa_mdb_present_in_other_db);
+
+/* Helpers for switches without specific HSR offloads, but which can implement
+ * NETIF_F_HW_HSR_DUP because their tagger uses dsa_xmit_port_mask()
+ */
+int dsa_port_simple_hsr_validate(struct dsa_switch *ds, int port,
+				 struct net_device *hsr,
+				 struct netlink_ext_ack *extack)
+{
+	enum hsr_port_type type;
+	int err;
+
+	err = hsr_get_port_type(hsr, dsa_to_port(ds, port)->user, &type);
+	if (err)
+		return err;
+
+	if (type != HSR_PT_SLAVE_A && type != HSR_PT_SLAVE_B) {
+		NL_SET_ERR_MSG_MOD(extack,
+				   "Only HSR slave ports can be offloaded");
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dsa_port_simple_hsr_validate);
+
+int dsa_port_simple_hsr_join(struct dsa_switch *ds, int port,
+			     struct net_device *hsr,
+			     struct netlink_ext_ack *extack)
+{
+	struct dsa_port *dp = dsa_to_port(ds, port), *other_dp;
+	int err;
+
+	err = dsa_port_simple_hsr_validate(ds, port, hsr, extack);
+	if (err)
+		return err;
+
+	dsa_hsr_foreach_port(other_dp, ds, hsr) {
+		if (other_dp != dp) {
+			dp->user->features |= NETIF_F_HW_HSR_DUP;
+			other_dp->user->features |= NETIF_F_HW_HSR_DUP;
+			break;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dsa_port_simple_hsr_join);
+
+int dsa_port_simple_hsr_leave(struct dsa_switch *ds, int port,
+			      struct net_device *hsr)
+{
+	struct dsa_port *dp = dsa_to_port(ds, port), *other_dp;
+
+	dsa_hsr_foreach_port(other_dp, ds, hsr) {
+		if (other_dp != dp) {
+			dp->user->features &= ~NETIF_F_HW_HSR_DUP;
+			other_dp->user->features &= ~NETIF_F_HW_HSR_DUP;
+			break;
+		}
+	}
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(dsa_port_simple_hsr_leave);
 
 static const struct dsa_stubs __dsa_stubs = {
 	.conduit_hwtstamp_validate = __dsa_conduit_hwtstamp_validate,

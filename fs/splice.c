@@ -930,14 +930,13 @@ static int warn_unsupported(struct file *file, const char *op)
 /*
  * Attempt to initiate a splice from pipe to file.
  */
-ssize_t do_splice_from(struct pipe_inode_info *pipe, struct file *out,
+static ssize_t do_splice_from(struct pipe_inode_info *pipe, struct file *out,
 			      loff_t *ppos, size_t len, unsigned int flags)
 {
 	if (unlikely(!out->f_op->splice_write))
 		return warn_unsupported(out, "write");
 	return out->f_op->splice_write(pipe, out, ppos, len, flags);
 }
-EXPORT_SYMBOL_GPL(do_splice_from);
 
 /*
  * Indicate to the caller that there was a premature EOF when reading from the
@@ -1499,7 +1498,7 @@ static int pipe_to_user(struct pipe_inode_info *pipe, struct pipe_buffer *buf,
 
 /*
  * For lack of a better implementation, implement vmsplice() to userspace
- * as a simple copy of the pipes pages to the user iov.
+ * as a simple copy of the pipe's pages to the user iov.
  */
 static ssize_t vmsplice_to_user(struct file *file, struct iov_iter *iter,
 				unsigned int flags)

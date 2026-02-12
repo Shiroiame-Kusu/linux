@@ -32,7 +32,6 @@ config LEGACY_DIRECT_IO
 
 if BLOCK
 
-source "fs/zfs/Kconfig"
 source "fs/ext2/Kconfig"
 source "fs/ext4/Kconfig"
 source "fs/jbd2/Kconfig"
@@ -333,7 +332,6 @@ source "fs/pstore/Kconfig"
 source "fs/ufs/Kconfig"
 source "fs/erofs/Kconfig"
 source "fs/vboxsf/Kconfig"
-source "fs/aufs/Kconfig"
 
 endif # MISC_FILESYSTEMS
 

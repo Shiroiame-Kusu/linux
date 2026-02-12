@@ -202,15 +202,6 @@ config HID_ASUS
 	- GL553V series
 	- GL753V series
 
-config HID_ASUS_ALLY
-    tristate "Asus Ally gamepad configuration support"
-    depends on USB_HID
-    depends on LEDS_CLASS
-    depends on LEDS_CLASS_MULTICOLOR
-    select POWER_SUPPLY
-    help
-    Support for configuring the Asus ROG Ally gamepad using attributes.
-
 config HID_AUREAL
 	tristate "Aureal"
 	help
@@ -392,6 +383,7 @@ config HID_EVISION
 	help
 	Support for some EVision keyboards. Note that this is needed only when
 	applying customization using userspace programs.
+	Support for some EVision devices requiring report descriptor fixups.
 
 config HID_EZKEY
 	tristate "Ezkey BTC 8193 keyboard"
@@ -1329,6 +1321,8 @@ config HID_WINWING
 	help
 	  Support for WinWing Orion2 throttle base with the following grips:
 
+	    * TGRIP-15E
+	    * TGRIP-15EX
 	    * TGRIP-16EX
 	    * TGRIP-18
 

@@ -120,7 +120,6 @@ bool path_noexec(const struct path *path)
 	return (path->mnt->mnt_flags & MNT_NOEXEC) ||
 	       (path->mnt->mnt_sb->s_iflags & SB_I_NOEXEC);
 }
-EXPORT_SYMBOL_GPL(path_noexec);
 
 #ifdef CONFIG_MMU
 /*
@@ -1281,10 +1280,9 @@ int begin_new_exec(struct linux_binprm * bprm)
 
 	/* Pass the opened binary to the interpreter. */
 	if (bprm->have_execfd) {
-		retval = get_unused_fd_flags(0);
+		retval = FD_ADD(0, bprm->executable);
 		if (retval < 0)
 			goto out_unlock;
-		fd_install(retval, bprm->executable);
 		bprm->executable = NULL;
 		bprm->execfd = retval;
 	}
@@ -1776,7 +1774,7 @@ out:
 		force_fatal_sig(SIGSEGV);
 
 	sched_mm_cid_after_execve(current);
-	rseq_set_notify_resume(current);
+	rseq_force_update();
 	current->in_execve = 0;
 
 	return retval;

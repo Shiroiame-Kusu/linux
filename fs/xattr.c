@@ -274,7 +274,7 @@ int __vfs_setxattr_noperm(struct mnt_idmap *idmap,
 int
 __vfs_setxattr_locked(struct mnt_idmap *idmap, struct dentry *dentry,
 		      const char *name, const void *value, size_t size,
-		      int flags, struct inode **delegated_inode)
+		      int flags, struct delegated_inode *delegated_inode)
 {
 	struct inode *inode = dentry->d_inode;
 	int error;
@@ -305,7 +305,7 @@ vfs_setxattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	     const char *name, const void *value, size_t size, int flags)
 {
 	struct inode *inode = dentry->d_inode;
-	struct inode *delegated_inode = NULL;
+	struct delegated_inode delegated_inode = { };
 	const void  *orig_value = value;
 	int error;
 
@@ -322,7 +322,7 @@ retry_deleg:
 				      flags, &delegated_inode);
 	inode_unlock(inode);
 
-	if (delegated_inode) {
+	if (is_delegated(&delegated_inode)) {
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)
 			goto retry_deleg;
@@ -405,7 +405,6 @@ vfs_getxattr_alloc(struct mnt_idmap *idmap, struct dentry *dentry,
 	*xattr_value = value;
 	return error;
 }
-EXPORT_SYMBOL_GPL(vfs_getxattr_alloc);
 
 ssize_t
 __vfs_getxattr(struct dentry *dentry, struct inode *inode, const char *name,
@@ -534,7 +533,7 @@ EXPORT_SYMBOL(__vfs_removexattr);
 int
 __vfs_removexattr_locked(struct mnt_idmap *idmap,
 			 struct dentry *dentry, const char *name,
-			 struct inode **delegated_inode)
+			 struct delegated_inode *delegated_inode)
 {
 	struct inode *inode = dentry->d_inode;
 	int error;
@@ -568,7 +567,7 @@ vfs_removexattr(struct mnt_idmap *idmap, struct dentry *dentry,
 		const char *name)
 {
 	struct inode *inode = dentry->d_inode;
-	struct inode *delegated_inode = NULL;
+	struct delegated_inode delegated_inode = { };
 	int error;
 
 retry_deleg:
@@ -577,7 +576,7 @@ retry_deleg:
 					 name, &delegated_inode);
 	inode_unlock(inode);
 
-	if (delegated_inode) {
+	if (is_delegated(&delegated_inode)) {
 		error = break_deleg_wait(&delegated_inode);
 		if (!error)
 			goto retry_deleg;

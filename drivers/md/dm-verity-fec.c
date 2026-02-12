@@ -177,9 +177,11 @@ error:
 	if (r < 0 && neras)
 		DMERR_LIMIT("%s: FEC %llu: failed to correct: %d",
 			    v->data_dev->name, (unsigned long long)rsb, r);
-	else if (r > 0)
+	else if (r > 0) {
 		DMWARN_LIMIT("%s: FEC %llu: corrected %d errors",
 			     v->data_dev->name, (unsigned long long)rsb, r);
+		atomic64_inc(&v->fec->corrected);
+	}
 
 	return r;
 }
@@ -327,7 +329,7 @@ static int fec_alloc_bufs(struct dm_verity *v, struct dm_verity_fec_io *fio)
 		if (fio->bufs[n])
 			continue;
 
-		fio->bufs[n] = mempool_alloc(&v->fec->extra_pool, GFP_NOWAIT);
+		fio->bufs[n] = kmem_cache_alloc(v->fec->cache, GFP_NOWAIT);
 		/* we can manage with even one buffer if necessary */
 		if (unlikely(!fio->bufs[n]))
 			break;
@@ -476,7 +478,8 @@ void verity_fec_finish_io(struct dm_verity_io *io)
 		mempool_free(fio->bufs[n], &f->prealloc_pool);
 
 	fec_for_each_extra_buffer(fio, n)
-		mempool_free(fio->bufs[n], &f->extra_pool);
+		if (fio->bufs[n])
+			kmem_cache_free(f->cache, fio->bufs[n]);
 
 	mempool_free(fio->output, &f->output_pool);
 }
@@ -528,7 +531,6 @@ void verity_fec_dtr(struct dm_verity *v)
 
 	mempool_exit(&f->rs_pool);
 	mempool_exit(&f->prealloc_pool);
-	mempool_exit(&f->extra_pool);
 	mempool_exit(&f->output_pool);
 	kmem_cache_destroy(f->cache);
 
@@ -778,12 +780,6 @@ int verity_fec_ctr(struct dm_verity *v)
 				     f->cache);
 	if (ret) {
 		ti->error = "Cannot allocate FEC buffer prealloc pool";
-		return ret;
-	}
-
-	ret = mempool_init_slab_pool(&f->extra_pool, 0, f->cache);
-	if (ret) {
-		ti->error = "Cannot allocate FEC buffer extra pool";
 		return ret;
 	}
 

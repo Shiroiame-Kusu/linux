@@ -3953,7 +3953,7 @@ static int asus_wmi_platform_profile_get(struct device *dev,
 		*profile = PLATFORM_PROFILE_PERFORMANCE;
 		break;
 	case ASUS_THROTTLE_THERMAL_POLICY_SILENT:
-		*profile = PLATFORM_PROFILE_LOW_POWER;
+		*profile = PLATFORM_PROFILE_QUIET;
 		break;
 	default:
 		return -EINVAL;
@@ -3977,7 +3977,7 @@ static int asus_wmi_platform_profile_set(struct device *dev,
 	case PLATFORM_PROFILE_BALANCED:
 		tp = ASUS_THROTTLE_THERMAL_POLICY_DEFAULT;
 		break;
-	case PLATFORM_PROFILE_LOW_POWER:
+	case PLATFORM_PROFILE_QUIET:
 		tp = ASUS_THROTTLE_THERMAL_POLICY_SILENT;
 		break;
 	default:
@@ -3990,7 +3990,7 @@ static int asus_wmi_platform_profile_set(struct device *dev,
 
 static int asus_wmi_platform_profile_probe(void *drvdata, unsigned long *choices)
 {
-	set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
+	set_bit(PLATFORM_PROFILE_QUIET, choices);
 	set_bit(PLATFORM_PROFILE_BALANCED, choices);
 	set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
 
@@ -4889,7 +4889,6 @@ static int asus_wmi_add(struct platform_device *pdev)
 	asus->egpu_enable_available = asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_EGPU);
 	asus->dgpu_disable_available = asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_DGPU);
 	asus->kbd_rgb_state_available = asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_TUF_RGB_STATE);
-	asus->oobe_state_available = asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_OOBE);
 
 	if (asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_MINI_LED_MODE))
 		asus->mini_led_dev_id = ASUS_WMI_DEVID_MINI_LED_MODE;
@@ -4901,6 +4900,8 @@ static int asus_wmi_add(struct platform_device *pdev)
 	else if (asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_GPU_MUX_VIVO))
 		asus->gpu_mux_dev = ASUS_WMI_DEVID_GPU_MUX_VIVO;
 #endif /* IS_ENABLED(CONFIG_ASUS_WMI_DEPRECATED_ATTRS) */
+
+	asus->oobe_state_available = asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_OOBE);
 
 	if (asus_wmi_dev_is_present(asus, ASUS_WMI_DEVID_THROTTLE_THERMAL_POLICY))
 		asus->throttle_thermal_policy_dev = ASUS_WMI_DEVID_THROTTLE_THERMAL_POLICY;

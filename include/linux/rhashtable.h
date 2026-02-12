@@ -387,7 +387,7 @@ static __always_inline struct rhash_head *__rht_ptr_rcu(
 	struct rhash_lock_head __rcu *const *bkt,
 	const enum rht_lookup_freq freq)
 {
-	return __rht_ptr(rcu_dereference(*bkt), bkt, freq);
+	return __rht_ptr(rcu_dereference_all(*bkt), bkt, freq);
 }
 
 static inline struct rhash_head *rht_ptr_rcu(
