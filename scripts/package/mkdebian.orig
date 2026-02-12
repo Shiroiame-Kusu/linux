@@ -133,7 +133,6 @@ gen_source ()
 
 rm -rf debian
 mkdir debian
-echo "12" > debian/compat
 
 user=${KBUILD_BUILD_USER:-$(id -nu)}
 name=${DEBFULLNAME:-${user}}
@@ -208,8 +207,12 @@ Section: kernel
 Priority: optional
 Maintainer: $maintainer
 Rules-Requires-Root: no
-Build-Depends:
-Build-Depends-Arch:
+Build-Depends: debhelper-compat (= 12)
+Build-Depends-Arch: bc, bison, flex,
+ gcc-${host_gnu} <!pkg.${sourcename}.nokernelheaders>,
+ kmod, libdw-dev:native, libelf-dev:native,
+ libssl-dev:native, libssl-dev <!pkg.${sourcename}.nokernelheaders>,
+ python3:native, rsync
 Homepage: https://www.kernel.org/
 
 Package: $packagename-${KERNELRELEASE}
