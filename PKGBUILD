@@ -1,9 +1,9 @@
 # Simplified PKGBUILD for pre-configured kernel source
 # Original: CachyOS linux-cachyos
-_pkgsuffix="cachyos-bmq-hakuu-v1-flto"
+_pkgsuffix="cachyos-hakuu-v1-flto"
 pkgbase="linux-$_pkgsuffix"
 _major=6.19
-_minor=0
+_minor=2
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
