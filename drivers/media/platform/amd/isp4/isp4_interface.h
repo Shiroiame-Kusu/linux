@@ -109,14 +109,14 @@ static inline u64 isp4if_join_addr64(u32 lo, u32 hi)
 int isp4if_f2h_resp(struct isp4_interface *ispif, enum isp4if_stream_id stream,
 		    struct isp4fw_resp *resp);
 
-int isp4if_send_command(struct isp4_interface *ispif, u32 cmd_id, const void *package,
-			u32 package_size);
+int isp4if_send_command(struct isp4_interface *ispif, u32 cmd_id,
+			const void *package, u32 package_size);
 
-int isp4if_send_command_sync(struct isp4_interface *ispif, u32 cmd_id, const void *package,
-			     u32 package_size);
+int isp4if_send_command_sync(struct isp4_interface *ispif, u32 cmd_id,
+			     const void *package, u32 package_size);
 
-struct isp4if_cmd_element *isp4if_rm_cmd_from_cmdq(struct isp4_interface *ispif, u32 seq_num,
-						   u32 cmd_id);
+struct isp4if_cmd_element *isp4if_rm_cmd_from_cmdq(struct isp4_interface *ispif,
+						   u32 seq_num, u32 cmd_id);
 
 void isp4if_clear_cmdq(struct isp4_interface *ispif);
 
@@ -124,11 +124,13 @@ void isp4if_clear_bufq(struct isp4_interface *ispif);
 
 void isp4if_dealloc_buffer_node(struct isp4if_img_buf_node *buf_node);
 
-struct isp4if_img_buf_node *isp4if_alloc_buffer_node(struct isp4if_img_buf_info *buf_info);
+struct isp4if_img_buf_node *
+isp4if_alloc_buffer_node(struct isp4if_img_buf_info *buf_info);
 
 struct isp4if_img_buf_node *isp4if_dequeue_buffer(struct isp4_interface *ispif);
 
-int isp4if_queue_buffer(struct isp4_interface *ispif, struct isp4if_img_buf_node *buf_node);
+int isp4if_queue_buffer(struct isp4_interface *ispif,
+			struct isp4if_img_buf_node *buf_node);
 
 int isp4if_stop(struct isp4_interface *ispif);
 
@@ -136,6 +138,7 @@ int isp4if_start(struct isp4_interface *ispif);
 
 int isp4if_deinit(struct isp4_interface *ispif);
 
-int isp4if_init(struct isp4_interface *ispif, struct device *dev, void __iomem *isp_mmio);
+int isp4if_init(struct isp4_interface *ispif, struct device *dev,
+		void __iomem *isp_mmio);
 
 #endif /* _ISP4_INTERFACE_H_ */

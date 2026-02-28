@@ -6,8 +6,8 @@
 #ifndef _ISP4_DEBUG_H_
 #define _ISP4_DEBUG_H_
 
-#include <linux/printk.h>
 #include <linux/dev_printk.h>
+#include <linux/printk.h>
 
 #include "isp4_subdev.h"
 

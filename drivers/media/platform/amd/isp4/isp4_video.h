@@ -6,8 +6,8 @@
 #ifndef _ISP4_VIDEO_H_
 #define _ISP4_VIDEO_H_
 
-#include <media/videobuf2-memops.h>
 #include <media/v4l2-dev.h>
+#include <media/videobuf2-memops.h>
 
 #include "isp4_interface.h"
 
@@ -21,11 +21,9 @@ struct isp4vid_capture_buffer {
 	struct vb2_v4l2_buffer vb2;
 	struct isp4if_img_buf_info img_buf;
 	struct list_head list;
-};
-
-struct isp4vid_ops {
-	int (*send_buffer)(struct v4l2_subdev *sd,
-			   struct isp4if_img_buf_info *img_buf);
+	struct dma_buf *dbuf;
+	void *bo;
+	u64 gpu_addr;
 };
 
 struct isp4vid_dev {
@@ -44,18 +42,12 @@ struct isp4vid_dev {
 	u32 sequence;
 	bool stream_started;
 
-	struct media_pipeline pipe;
 	struct device *dev;
 	struct v4l2_subdev *isp_sdev;
 	struct v4l2_fract timeperframe;
-
-	/* Callback operations */
-	const struct isp4vid_ops *ops;
 };
 
-int isp4vid_dev_init(struct isp4vid_dev *isp_vdev,
-		     struct v4l2_subdev *isp_sdev,
-		     const struct isp4vid_ops *ops);
+int isp4vid_dev_init(struct isp4vid_dev *isp_vdev, struct v4l2_subdev *isp_sd);
 
 void isp4vid_dev_deinit(struct isp4vid_dev *isp_vdev);
 
