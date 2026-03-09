@@ -1,0 +1,32 @@
+--- kernel/sched/alt_sched.h
++++ kernel/sched/alt_sched.h
+@@ -452,25 +452,20 @@ static inline void lockdep_assert_rq_held(struct rq *rq)
+ }
+ 
+ extern void raw_spin_rq_lock_nested(struct rq *rq, int subclass);
+-// extern void raw_spin_rq_unlock(struct rq *rq);
++extern void raw_spin_rq_unlock(struct rq *rq);
+ 
+-static __always_inline void raw_spin_rq_lock(struct rq *rq)
++static inline void raw_spin_rq_lock(struct rq *rq)
+ {
+ 	raw_spin_rq_lock_nested(rq, 0);
+ }
+ 
+-static __always_inline void raw_spin_rq_unlock(struct rq *rq)
+-{
+-	raw_spin_unlock(rq_lockp(rq));
+-}
+-
+-static __always_inline void raw_spin_rq_lock_irq(struct rq *rq)
++static inline void raw_spin_rq_lock_irq(struct rq *rq)
+ {
+ 	local_irq_disable();
+ 	raw_spin_rq_lock(rq);
+ }
+ 
+-static __always_inline void raw_spin_rq_unlock_irq(struct rq *rq)
++static inline void raw_spin_rq_unlock_irq(struct rq *rq)
+ {
+ 	raw_spin_rq_unlock(rq);
+ 	local_irq_enable();

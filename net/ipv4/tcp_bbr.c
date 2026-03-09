@@ -124,10 +124,10 @@ struct bbr {
 	u32	pacing_gain:10,	/* current gain for setting pacing rate */
 		cwnd_gain:10,	/* current gain for setting cwnd */
 		full_bw_reached:1,   /* reached full bw in Startup? */
-		full_bw_cnt:2,	/* number of rounds without large bw gains */
+		full_bw_cnt:3,	/* number of rounds without large bw gains */
 		cycle_idx:2,	/* current index in pacing_gain cycle array */
 		has_seen_rtt:1, /* have we seen an RTT sample yet? */
-		unused_2:6;
+		unused_2:5;
 	u32	prior_cwnd;	/* prior cwnd upon entering loss recovery */
 	u32	full_bw;	/* recent bw, to estimate if pipe is full */
 
@@ -183,14 +183,14 @@ struct bbr_context {
 /* Window length of min_rtt filter (in sec): */
 static const u32 bbr_min_rtt_win_sec = 10;
 /* Minimum time (in ms) spent at bbr_cwnd_min_target in BBR_PROBE_RTT mode: */
-static const u32 bbr_probe_rtt_mode_ms = 200;
+static const u32 bbr_probe_rtt_mode_ms = 100;
 /* Window length of probe_rtt_min_us filter (in ms), and consequently the
- * typical interval between PROBE_RTT mode entries. The default is 5000ms.
+ * typical interval between PROBE_RTT mode entries.
  * Note that bbr_probe_rtt_win_ms must be <= bbr_min_rtt_win_sec * MSEC_PER_SEC
  */
-static const u32 bbr_probe_rtt_win_ms = 5000;
+static const u32 bbr_probe_rtt_win_ms = 10000;
 /* Proportion of cwnd to estimated BDP in PROBE_RTT, in units of BBR_UNIT: */
-static const u32 bbr_probe_rtt_cwnd_gain = BBR_UNIT * 1 / 2;
+static const u32 bbr_probe_rtt_cwnd_gain = BBR_UNIT * 7 / 10;
 
 /* Use min_rtt to help adapt TSO burst size, with smaller min_rtt resulting
  * in bigger TSO bursts. We cut the RTT-based allowance in half
@@ -199,32 +199,29 @@ static const u32 bbr_probe_rtt_cwnd_gain = BBR_UNIT * 1 / 2;
  */
 static const u32 bbr_tso_rtt_shift = 9;
 
-/* Pace at ~1% below estimated bw, on average, to reduce queue at bottleneck.
- * In order to help drive the network toward lower queues and low latency while
- * maintaining high utilization, the average pacing rate aims to be slightly
- * lower than the estimated bandwidth. This is an important aspect of the
- * design.
+/* Pace at estimated bw (no margin) for maximum throughput.
+ * Aggressive: no pacing margin, to fully utilize the bottleneck link.
  */
-static const int bbr_pacing_margin_percent = 1;
+static const int bbr_pacing_margin_percent = 0;
 
 /* We use a startup_pacing_gain of 4*ln(2) because it's the smallest value
  * that will allow a smoothly increasing pacing rate that will double each RTT
  * and send the same number of packets per RTT that an un-paced, slow-starting
  * Reno or CUBIC flow would:
  */
-static const int bbr_startup_pacing_gain = BBR_UNIT * 277 / 100 + 1;
+static const int bbr_startup_pacing_gain = BBR_UNIT * 350 / 100 + 1;
 /* The gain for deriving startup cwnd: */
-static const int bbr_startup_cwnd_gain = BBR_UNIT * 2;
+static const int bbr_startup_cwnd_gain = BBR_UNIT * 3;
 /* The pacing gain in BBR_DRAIN is calculated to typically drain
  * the queue created in BBR_STARTUP in a single round:
  */
-static const int bbr_drain_gain = BBR_UNIT * 1000 / 2885;
+static const int bbr_drain_gain = BBR_UNIT * 1000 / 3500;
 /* The gain for deriving steady-state cwnd tolerates delayed/stretched ACKs: */
-static const int bbr_cwnd_gain  = BBR_UNIT * 2;
+static const int bbr_cwnd_gain  = BBR_UNIT * 5 / 2;
 /* The pacing_gain values for the PROBE_BW gain cycle, to discover/share bw: */
 static const int bbr_pacing_gain[] = {
-	BBR_UNIT * 5 / 4,	/* UP: probe for more available bw */
-	BBR_UNIT * 91 / 100,	/* DOWN: drain queue and/or yield bw */
+	BBR_UNIT * 3 / 2,	/* UP: probe for more available bw (aggressive) */
+	BBR_UNIT * 95 / 100,	/* DOWN: drain queue slowly, keep throughput */
 	BBR_UNIT,		/* CRUISE: try to use pipe w/ some headroom */
 	BBR_UNIT,		/* REFILL: refill pipe to estimated 100% */
 };
@@ -242,10 +239,10 @@ enum bbr_pacing_gain_phase {
 static const u32 bbr_cwnd_min_target = 4;
 
 /* To estimate if BBR_STARTUP or BBR_BW_PROBE_UP has filled pipe... */
-/* If bw has increased significantly (1.25x), there may be more bw available: */
-static const u32 bbr_full_bw_thresh = BBR_UNIT * 5 / 4;
-/* But after 3 rounds w/o significant bw growth, estimate pipe is full: */
-static const u32 bbr_full_bw_cnt = 3;
+/* If bw has increased significantly (1.125x), there may be more bw available: */
+static const u32 bbr_full_bw_thresh = BBR_UNIT * 9 / 8;
+/* But after 4 rounds w/o significant bw growth, estimate pipe is full: */
+static const u32 bbr_full_bw_cnt = 4;
 
 /* Gain factor for adding extra_acked to target cwnd: */
 static const int bbr_extra_acked_gain = BBR_UNIT;
@@ -253,8 +250,10 @@ static const int bbr_extra_acked_gain = BBR_UNIT;
 static const u32 bbr_extra_acked_win_rtts = 5;
 /* Max allowed val for ack_epoch_acked, after which sampling epoch is reset */
 static const u32 bbr_ack_epoch_acked_reset_thresh = 1U << 20;
-/* Time period for clamping cwnd increment due to ack aggregation */
-static const u32 bbr_extra_acked_max_us = 100 * 1000;
+/* Time period for clamping cwnd increment due to ack aggregation.
+ * Extended to 200ms for better burst tolerance on WiFi/mobile.
+ */
+static const u32 bbr_extra_acked_max_us = 200 * 1000;
 
 /* Flags to control BBR ECN-related behavior... */
 
@@ -267,9 +266,9 @@ static const bool bbr_precise_ece_ack = true;
 static const u32 bbr_ecn_max_rtt_us = 5000;
 
 /* On losses, scale down inflight and pacing rate by beta scaled by BBR_SCALE.
- * No loss response when 0.
+ * No loss response when 0. Aggressive: cut minimally (5% instead of 30%).
  */
-static const u32 bbr_beta = BBR_UNIT * 30 / 100;
+static const u32 bbr_beta = BBR_UNIT * 5 / 100;
 
 /* Gain factor for ECN mark ratio samples, scaled by BBR_SCALE (1/16 = 6.25%) */
 static const u32 bbr_ecn_alpha_gain = BBR_UNIT * 1 / 16;
@@ -280,47 +279,53 @@ static const u32 bbr_ecn_alpha_gain = BBR_UNIT * 1 / 16;
 static const u32 bbr_ecn_alpha_init = BBR_UNIT;
 
 /* On ECN, cut inflight_lo to (1 - ecn_factor * ecn_alpha) scaled by BBR_SCALE.
- * No ECN based bounding when 0.
+ * No ECN based bounding when 0. Aggressive: weaker ECN response.
  */
-static const u32 bbr_ecn_factor = BBR_UNIT * 1 / 3;	 /* 1/3 = 33% */
+static const u32 bbr_ecn_factor = BBR_UNIT * 1 / 6;	 /* 1/6 ~= 17% */
 
 /* Estimate bw probing has gone too far if CE ratio exceeds this threshold.
- * Scaled by BBR_SCALE. Disabled when 0.
+ * Scaled by BBR_SCALE. Disabled when 0. Aggressive: tolerate more ECN.
  */
-static const u32 bbr_ecn_thresh = BBR_UNIT * 1 / 2;  /* 1/2 = 50% */
+static const u32 bbr_ecn_thresh = BBR_UNIT * 3 / 4;  /* 3/4 = 75% */
 
 /* If non-zero, if in a cycle with no losses but some ECN marks, after ECN
  * clears then make the first round's increment to inflight_hi the following
  * fraction of inflight_hi.
  */
-static const u32 bbr_ecn_reprobe_gain = BBR_UNIT * 1 / 2;
+static const u32 bbr_ecn_reprobe_gain = BBR_UNIT * 3 / 4;
 
-/* Estimate bw probing has gone too far if loss rate exceeds this level. */
-static const u32 bbr_loss_thresh = BBR_UNIT * 2 / 100;  /* 2% loss */
+/* Estimate bw probing has gone too far if loss rate exceeds this level.
+ * Aggressive: tolerate up to 3% loss.
+ */
+static const u32 bbr_loss_thresh = BBR_UNIT * 3 / 100;  /* 3% loss */
 
-/* Slow down for a packet loss recovered by TLP? */
-static const bool bbr_loss_probe_recovery = true;
+/* Slow down for a packet loss recovered by TLP?
+ * Disabled: TLP loss is typically tail-packet loss, not congestion.
+ */
+static const bool bbr_loss_probe_recovery = false;
 
 /* Exit STARTUP if number of loss marking events in a Recovery round is >= N,
  * and loss rate is higher than bbr_loss_thresh.
  * Disabled if 0.
  */
-static const u32 bbr_full_loss_cnt = 6;
+static const u32 bbr_full_loss_cnt = 8;
 
 /* Exit STARTUP if number of round trips with ECN mark rate above ecn_thresh
  * meets this count.
  */
-static const u32 bbr_full_ecn_cnt = 2;
+static const u32 bbr_full_ecn_cnt = 3;
 
-/* Fraction of unutilized headroom to try to leave in path upon high loss. */
-static const u32 bbr_inflight_headroom = BBR_UNIT * 15 / 100;
+/* Fraction of unutilized headroom to try to leave in path upon high loss.
+ * Aggressive: leave minimal headroom (5% instead of 15%).
+ */
+static const u32 bbr_inflight_headroom = BBR_UNIT * 5 / 100;
 
 /* How much do we increase cwnd_gain when probing for bandwidth in
  * BBR_BW_PROBE_UP? This specifies the increment in units of
  * BBR_UNIT/4. The default is 1, meaning 0.25.
  * The min value is 0 (meaning 0.0); max is 3 (meaning 0.75).
  */
-static const u32 bbr_bw_probe_cwnd_gain = 1;
+static const u32 bbr_bw_probe_cwnd_gain = 2;
 
 /* Max number of packet-timed rounds to wait before probing for bandwidth.  If
  * we want to tolerate 1% random loss per round, and not have this cut our
@@ -329,20 +334,21 @@ static const u32 bbr_bw_probe_cwnd_gain = 1;
  * We aim to be fair with Reno/CUBIC up to a BDP of at least:
  *  BDP = 25Mbps * .030sec /(1514bytes) = 61.9 packets
  */
-static const u32 bbr_bw_probe_max_rounds = 63;
+static const u32 bbr_bw_probe_max_rounds = 32;
 
 /* Max amount of randomness to inject in round counting for Reno-coexistence.
+ * Reduced for more deterministic, frequent probing.
  */
-static const u32 bbr_bw_probe_rand_rounds = 2;
+static const u32 bbr_bw_probe_rand_rounds = 1;
 
 /* Use BBR-native probe time scale starting at this many usec.
  * We aim to be fair with Reno/CUBIC up to an inter-loss time epoch of at least:
  *  BDP*RTT = 25Mbps * .030sec /(1514bytes) * 0.030sec = 1.9 secs
  */
-static const u32 bbr_bw_probe_base_us = 2 * USEC_PER_SEC;  /* 2 secs */
+static const u32 bbr_bw_probe_base_us = USEC_PER_SEC / 2;  /* 0.5 sec */
 
 /* Use BBR-native probes spread over this many usec: */
-static const u32 bbr_bw_probe_rand_us = 1 * USEC_PER_SEC;  /* 1 secs */
+static const u32 bbr_bw_probe_rand_us = USEC_PER_SEC / 4;  /* 0.25 secs */
 
 /* Use fast path if app-limited, no loss/ECN, and target cwnd was reached? */
 static const bool bbr_fast_path = true;
@@ -616,9 +622,11 @@ static u32 bbr_quantization_budget(struct sock *sk, u32 cwnd)
 	/* Allow enough full-sized skbs in flight to utilize end systems. */
 	cwnd = max_t(u32, cwnd, tso_segs_goal);
 	cwnd = max_t(u32, cwnd, bbr_param(sk, cwnd_min_target));
-	/* Ensure gain cycling gets inflight above BDP even for small BDPs. */
+	/* Ensure gain cycling gets inflight above BDP even for small BDPs.
+	 * Increased from +2 to +4 for more effective probing on small BDP paths.
+	 */
 	if (bbr->mode == BBR_PROBE_BW && bbr->cycle_idx == BBR_BW_PROBE_UP)
-		cwnd += 2;
+		cwnd += 4;
 
 	return cwnd;
 }
@@ -1334,14 +1342,22 @@ static void bbr_init_lower_bounds(struct sock *sk, bool init_bw)
 		bbr->inflight_lo = tcp_snd_cwnd(tp);
 }
 
-/* Reduce bw and inflight to (1 - beta). */
+/* Reduce bw and inflight to (1 - beta), with a floor to prevent
+ * bw_lo from dropping below bbr_bw_lo_floor_pct of max_bw.
+ * This avoids prolonged throughput degradation from compound cuts.
+ */
 static void bbr_loss_lower_bounds(struct sock *sk, u32 *bw, u32 *inflight)
 {
 	struct bbr* bbr = inet_csk_ca(sk);
 	u32 loss_cut = BBR_UNIT - bbr_param(sk, beta);
+	u32 bw_floor;
+
+	/* Floor: never let bw_lo drop below 85% of max_bw. */
+	bw_floor = (u64)bbr_max_bw(sk) * BBR_UNIT * 85 / 100 >> BBR_SCALE;
 
 	*bw = max_t(u32, bbr->bw_latest,
 		    (u64)bbr->bw_lo * loss_cut >> BBR_SCALE);
+	*bw = max(*bw, bw_floor);
 	*inflight = max_t(u32, bbr->inflight_latest,
 			  (u64)bbr->inflight_lo * loss_cut >> BBR_SCALE);
 }
@@ -1370,6 +1386,12 @@ static void bbr_ecn_lower_bounds(struct sock *sk, u32 *inflight)
  * Anything faster than that approach would knowingly risk high loss, which can
  * cause low bw for Reno/CUBIC and high loss recovery latency for
  * request/response flows using any congestion control.
+ *
+ * Aggressive modifications:
+ * - Only reduce bw_lo when delivery rate actually declined below bw_lo,
+ *   preventing random non-capacity-limiting loss from triggering reductions.
+ * - Gradually recover bw_lo/inflight_lo during loss-free rounds, breaking
+ *   the death spiral of compound bw_lo reductions.
  */
 static void bbr_adapt_lower_bounds(struct sock *sk,
 				    const struct rate_sample *rs)
@@ -1389,10 +1411,45 @@ static void bbr_adapt_lower_bounds(struct sock *sk,
 		bbr_ecn_lower_bounds(sk, &ecn_inflight_lo);
 	}
 
-	/* Loss response. */
+	/* Loss response: only reduce bw_lo when the actual delivery rate
+	 * has dropped below our current lower bound estimate. Random loss
+	 * that doesn't affect throughput should not trigger bw_lo reduction.
+	 * However, if delivery rate exceeds bw_lo during loss, let bw_lo
+	 * track upward to match actual path capacity.
+	 */
 	if (bbr->loss_in_round) {
-		bbr_init_lower_bounds(sk, true);
-		bbr_loss_lower_bounds(sk, &bbr->bw_lo, &bbr->inflight_lo);
+		if (bbr->bw_lo == ~0U || bbr->bw_latest < bbr->bw_lo) {
+			/* Delivery rate declined: real congestion. */
+			bbr_init_lower_bounds(sk, true);
+			bbr_loss_lower_bounds(sk, &bbr->bw_lo,
+					      &bbr->inflight_lo);
+		} else if (bbr->bw_lo != ~0U &&
+			   bbr->bw_latest > bbr->bw_lo) {
+			/* Loss but delivery rate is healthy: track upward.
+			 * This prevents bw_lo from being stuck at a stale
+			 * low value on paths with persistent random loss.
+			 */
+			bbr->bw_lo = bbr->bw_latest;
+		}
+	} else if (bbr->bw_lo != ~0U) {
+		/* No loss this round: gradually recover bw_lo and inflight_lo
+		 * toward full capacity. Increase by ~2.5% per round
+		 * (beta/2 = 6/256). This breaks the death spiral by allowing
+		 * recovery without waiting for PROBE_REFILL.
+		 */
+		u32 recovery = BBR_UNIT + bbr_param(sk, beta) / 2;
+		u32 max_bw = bbr_max_bw(sk);
+
+		bbr->bw_lo = (u64)bbr->bw_lo * recovery >> BBR_SCALE;
+		if (bbr->bw_lo >= max_bw)
+			bbr->bw_lo = ~0U;  /* fully recovered, remove limit */
+
+		if (bbr->inflight_lo != ~0U) {
+			bbr->inflight_lo = (u64)bbr->inflight_lo *
+					   recovery >> BBR_SCALE;
+			if (bbr->inflight_lo >= tcp_snd_cwnd(tcp_sk(sk)))
+				bbr->inflight_lo = ~0U;
+		}
 	}
 
 	/* Adjust to the lower of the levels implied by loss/ECN. */
@@ -1641,9 +1698,15 @@ static void bbr_handle_inflight_too_high(struct sock *sk,
 	 * samples are not known to be robustly probing bw).
 	 */
 	if (!rs->is_app_limited) {
+		/* Use the larger of beta/2 and a 3% floor to cut inflight_hi.
+		 * This ensures aggressive recovery (small cuts) while
+		 * guaranteeing at least 3% reduction for convergence.
+		 */
+		u32 hi_beta = max_t(u32, beta / 2,
+				    BBR_UNIT * 3 / 100);
 		bbr->inflight_hi = max_t(u32, rs->tx_in_flight,
 					 (u64)bbr_target_inflight(sk) *
-					 (BBR_UNIT - beta) >> BBR_SCALE);
+					 (BBR_UNIT - hi_beta) >> BBR_SCALE);
 	}
 	if (bbr->mode == BBR_PROBE_BW && bbr->cycle_idx == BBR_BW_PROBE_UP)
 		bbr_start_bw_probe_down(sk);
