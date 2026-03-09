@@ -930,19 +930,16 @@ static void nohz_csd_func(void *info)
 
 void yield_task(struct rq *rq)
 {
-	/* disable yield code for now
 	struct task_struct *p;
-
+	int cpu;
 	if (!sched_yield_type)
 		return;
-
+	cpu = cpu_of(rq);
 	p = current;
-	if (!rt_task(p) && rq->nr_running > 1) {
+	if (!rt_task(p) && srq_nr_queued(cpu)) {
 		do_sched_yield_type_1(p, rq);
-		update_sched_rq_prio(rq);
-		wakeup_preempt(rq);
+		update_sched_cpu_prio(cpu, task_sched_prio(p));
 	}
-	*/
 }
 
 static __always_inline
