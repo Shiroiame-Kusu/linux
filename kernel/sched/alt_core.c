@@ -931,14 +931,13 @@ static void nohz_csd_func(void *info)
 void yield_task(struct rq *rq)
 {
 	struct task_struct *p;
-	int cpu;
 	if (!sched_yield_type)
 		return;
-	cpu = cpu_of(rq);
+
 	p = current;
-	if (!rt_task(p) && srq_nr_queued(cpu)) {
+	if (!rt_task(p) && p != rq->idle) {
 		do_sched_yield_type_1(p, rq);
-		update_sched_cpu_prio(cpu, task_sched_prio(p));
+		update_sched_cpu_prio(cpu_of(rq), task_sched_prio(p));
 	}
 }
 
@@ -4061,13 +4060,13 @@ static __always_inline int check_curr(struct task_struct *p, struct rq *rq)
 static __always_inline void migrate_preempt_task(struct task_struct *p, const int cpu)
 {
 	/* idle preempt success rate ~52.7% */
-	/* disable high risk code path: preempt list -> preempt list on other cpu
+	// disable high risk code path: preempt list -> preempt list on other cpu
 	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr);
 
 	if (rq)
 		preempt_on_rq(p, rq);
 	else
-	*/
+	
 		activate_task(p, cpu_srq(cpu));
 }
 

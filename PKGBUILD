@@ -1,18 +1,19 @@
 # Simplified PKGBUILD for pre-configured kernel source
 # Original: CachyOS linux-cachyos
-_pkgsuffix="cachyos-lfbmq-hakuu-v1-flto-bledge"
+_pkgsuffix="cachyos-lfbmq-hakuu-flto-bledge"
 pkgbase="linux-$_pkgsuffix"
 _major=6.19
 _minor=5
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
-pkgrel=2
+pkgrel=1
+pkgrev=2
 pkgdesc='Linux CachyOS Kernel (pre-configured build) by Hakuu'
 arch=('x86_64')
 url="https://github.com/CachyOS/linux-cachyos"
 license=('GPL-2.0-only')
-_kernver="$pkgver-$pkgrel"
+_kernver="$pkgver-$pkgrel.$_pkgrev"
 _kernuname="${pkgver}-${_pkgsuffix}"
 makedepends=(
     bc
