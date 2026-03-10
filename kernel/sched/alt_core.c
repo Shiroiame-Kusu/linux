@@ -4060,13 +4060,13 @@ static __always_inline int check_curr(struct task_struct *p, struct rq *rq)
 static __always_inline void migrate_preempt_task(struct task_struct *p, const int cpu)
 {
 	/* idle preempt success rate ~52.7% */
-	// disable high risk code path: preempt list -> preempt list on other cpu
+	/* disable high risk code path: preempt list -> preempt list on other cpu
 	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr);
 
 	if (rq)
 		preempt_on_rq(p, rq);
 	else
-	
+	*/
 		activate_task(p, cpu_srq(cpu));
 }
 
