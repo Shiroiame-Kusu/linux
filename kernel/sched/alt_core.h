@@ -185,9 +185,9 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_flags *rf)
 {
 	for (;;) {
-		while (READ_ONCE(p->__state) == TASK_WAKING) {
-			cpu_relax();
-		}
+		// while (READ_ONCE(p->__state) == TASK_WAKING) {
+		// 	cpu_relax();
+		// }
 		if (TASK_ON_RQ_WAKING == p->on_rq) {
 			struct rq *rq = cpu_rq(p->wake_cpu);
 
