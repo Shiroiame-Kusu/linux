@@ -1,20 +1,22 @@
 # Simplified PKGBUILD for pre-configured kernel source
 # Original: CachyOS linux-cachyos
-_pkgsuffix="cachyos-lfbmq-hakuu-flto-bledge"
+_pkgsuffix="cachyos-lfbmq-hakuu-tlto-bledge"
 pkgbase="linux-$_pkgsuffix"
 _major=6.19
 _minor=5
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
-pkgrel=1
-pkgrev=4
+pkgrel=6
+: "${_build_nvidia_open:=yes}"
 pkgdesc='Linux CachyOS Kernel (pre-configured build) by Hakuu'
 arch=('x86_64')
 url="https://github.com/CachyOS/linux-cachyos"
 license=('GPL-2.0-only')
-_kernver="$pkgver-$pkgrel.$_pkgrev"
+_kernver="$pkgver-$pkgrel"
 _kernuname="${pkgver}-${_pkgsuffix}"
+_nv_ver=590.48.01
+_nv_open_pkg="NVIDIA-kernel-module-source-${_nv_ver}"
 makedepends=(
     bc
     cpio
@@ -37,6 +39,21 @@ makedepends=(
 source=()
 b2sums=()
 
+if [ "$_build_nvidia_open" = "yes" ]; then
+    source+=(
+        "https://download.nvidia.com/XFree86/${_nv_open_pkg%"-$_nv_ver"}/${_nv_open_pkg}.tar.xz"
+        "https://raw.githubusercontent.com/cachyos/kernel-patches/master/${_major}/misc/nvidia/0001-Enable-atomic-kernel-modesetting-by-default.patch"
+        "https://raw.githubusercontent.com/cachyos/kernel-patches/master/${_major}/misc/nvidia/0002-Add-IBT-support.patch"
+        "https://raw.githubusercontent.com/cachyos/kernel-patches/master/${_major}/misc/nvidia/0003-Fix-compile-for-6.19.patch"
+    )
+    b2sums+=(
+        'SKIP'
+        'SKIP'
+        'SKIP'
+        'SKIP'
+    )
+fi
+
 export KBUILD_BUILD_HOST=cachyos
 export KBUILD_BUILD_USER="$pkgbase"
 export KBUILD_BUILD_TIMESTAMP="$(date -Ru${SOURCE_DATE_EPOCH:+d @$SOURCE_DATE_EPOCH})"
@@ -57,6 +74,15 @@ prepare() {
 
     echo "Preparing build..."
     make "${BUILD_FLAGS[@]}" prepare
+
+    if [ "$_build_nvidia_open" = "yes" ]; then
+        patch -Np1 -i "${srcdir}/0001-Enable-atomic-kernel-modesetting-by-default.patch" \
+            -d "${srcdir}/${_nv_open_pkg}/kernel-open"
+        patch -Np1 -i "${srcdir}/0002-Add-IBT-support.patch" \
+            -d "${srcdir}/${_nv_open_pkg}"
+        patch -Np1 -i "${srcdir}/0003-Fix-compile-for-6.19.patch" \
+            -d "${srcdir}/${_nv_open_pkg}"
+    fi
     
     make -s kernelrelease > version
     echo "Prepared $pkgbase version $(<version)"
@@ -70,6 +96,20 @@ build() {
 
     echo "Building bpftool vmlinux.h..."
     make -C tools/bpf/bpftool vmlinux.h feature-clang-bpf-co-re=1
+
+    if [ "$_build_nvidia_open" = "yes" ]; then
+        local module_flags=(
+            KERNEL_UNAME="${_kernuname}"
+            IGNORE_PREEMPT_RT_PRESENCE=1
+            SYSSRC="$srcdir/../"
+            SYSOUT="$srcdir/../"
+            IGNORE_CC_MISMATCH=yes
+        )
+
+        echo "Building nvidia-open modules..."
+        cd "${srcdir}/${_nv_open_pkg}"
+        CFLAGS= CXXFLAGS= LDFLAGS= make "${BUILD_FLAGS[@]}" "${module_flags[@]}" -j"$(nproc)" modules
+    fi
 }
 
 _package() {
@@ -80,6 +120,12 @@ _package() {
         'linux-firmware: firmware images needed for some devices'
     )
     provides=(VIRTUALBOX-GUEST-MODULES WIREGUARD-MODULE KSMBD-MODULE V4L2LOOPBACK-MODULE NTSYNC-MODULE VHBA-MODULE ADIOS-MODULE)
+    conflicts=()
+
+    if [ "$_build_nvidia_open" = "yes" ]; then
+        optdepends+=("nvidia-utils: userspace components for bundled nvidia-open modules")
+        conflicts+=('nvidia-open' 'nvidia-open-dkms')
+    fi
 
     cd "$srcdir/../"
 
@@ -93,6 +139,14 @@ _package() {
     echo "Installing modules..."
     ZSTD_CLEVEL=19 make "${BUILD_FLAGS[@]}" INSTALL_MOD_PATH="$pkgdir/usr" INSTALL_MOD_STRIP=1 \
         DEPMOD=/doesnt/exist modules_install
+
+    if [ "$_build_nvidia_open" = "yes" ]; then
+        echo "Installing bundled nvidia-open modules..."
+        cd "${srcdir}/${_nv_open_pkg}"
+        install -dm755 "$modulesdir/extramodules"
+        install -m644 kernel-open/*.ko "$modulesdir/extramodules"
+        install -Dt "$pkgdir/usr/share/licenses/${pkgbase}" -m644 COPYING
+    fi
 
     rm "$modulesdir"/build
 }
