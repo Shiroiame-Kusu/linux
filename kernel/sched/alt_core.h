@@ -266,6 +266,23 @@ DEFINE_LOCK_GUARD_1(task_access_lock, struct task_struct,
 		    task_access_unlock(_T->lock, &_T->rf),
 		    struct rq *rq; struct rq_flags rf)
 
+#define task_rq_lock(...) __acquire_ret(_task_rq_lock(__VA_ARGS__), __rq_lockp(__ret))
+extern struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
+	__acquires(&p->pi_lock) __acquires_ret;
+
+static inline void
+task_rq_unlock(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
+	__releases(__rq_lockp(rq), &p->pi_lock)
+{
+	raw_spin_unlock(&rq->lock);
+	raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+}
+
+DEFINE_LOCK_GUARD_1(task_rq_lock, struct task_struct,
+		    _T->rq = task_rq_lock(_T->lock, &_T->rf),
+		    task_rq_unlock(_T->rq, _T->lock, &_T->rf),
+		    struct rq *rq; struct rq_flags rf)
+
 extern void yield_task(struct rq *rq);
 
 DECLARE_STATIC_KEY_FALSE(sched_smt_present);

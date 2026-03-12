@@ -334,6 +334,45 @@ static inline void __task_rq_unlock(struct rq_flags *rf)
 		raw_spin_unlock(rf->lock);
 }
 
+/*
+ * task_rq_lock - lock p->pi_lock and lock the rq @p resides on.
+ */
+struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
+{
+	struct rq *rq;
+
+	for (;;) {
+		raw_spin_lock_irqsave(&p->pi_lock, rf->flags);
+		rq = task_rq(p);
+		raw_spin_lock(&rq->lock);
+		/*
+		 *	move_queued_task()		task_rq_lock()
+		 *
+		 *	ACQUIRE (rq->lock)
+		 *	[S] ->on_rq = MIGRATING		[L] rq = task_rq()
+		 *	WMB (__set_task_cpu())		ACQUIRE (rq->lock);
+		 *	[S] ->cpu = new_cpu		[L] task_rq()
+		 *					[L] ->on_rq
+		 *	RELEASE (rq->lock)
+		 *
+		 * If we observe the old CPU in task_rq_lock(), the acquire of
+		 * the old rq->lock will fully serialize against the stores.
+		 *
+		 * If we observe the new CPU in task_rq_lock(), the address
+		 * dependency headed by '[L] rq = task_rq()' and the acquire
+		 * will pair with the WMB to ensure we then also see migrating.
+		 */
+		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p))) {
+			return rq;
+		}
+		raw_spin_unlock(&rq->lock);
+		raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+
+		while (unlikely(task_on_rq_migrating(p)))
+			cpu_relax();
+	}
+}
+
 static inline void rq_lock_irqsave(struct rq *rq, struct rq_flags *rf)
 	__acquires(rq->lock)
 {
@@ -6977,7 +7016,7 @@ static inline void mm_cid_transit_to_cpu(struct task_struct *t, struct mm_cid_pc
 static bool mm_cid_fixup_task_to_cpu(struct task_struct *t, struct mm_struct *mm)
 {
 	/* Remote access to mm::mm_cid::pcpu requires rq_lock */
-	guard(task_access_lock)(t);
+	guard(task_rq_lock)(t);
 	/* If the task is not active it is not in the users count */
 	if (!t->mm_cid.active)
 		return false;
