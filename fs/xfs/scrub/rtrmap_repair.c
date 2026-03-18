@@ -103,11 +103,14 @@ xrep_setup_rtrmapbt(
 	struct xfs_scrub	*sc)
 {
 	struct xrep_rtrmap	*rr;
+	char			*descr;
 	int			error;
 
 	xchk_fsgates_enable(sc, XCHK_FSGATES_RMAP);
 
-	error = xrep_setup_xfbtree(sc, "realtime reverse mapping records");
+	descr = xchk_xfile_rtgroup_descr(sc, "reverse mapping records");
+	error = xrep_setup_xfbtree(sc, descr);
+	kfree(descr);
 	if (error)
 		return error;
 

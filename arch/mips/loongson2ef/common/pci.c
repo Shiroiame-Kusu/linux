@@ -17,7 +17,7 @@ static struct resource loongson_pci_mem_resource = {
 
 static struct resource loongson_pci_io_resource = {
 	.name	= "pci io space",
-	.start	= 0x00000000UL, /* See loongson2ef_pcibios_init(). */
+	.start	= LOONGSON_PCI_IO_START,
 	.end	= IO_SPACE_LIMIT,
 	.flags	= IORESOURCE_IO,
 };
@@ -73,19 +73,15 @@ static void __init setup_pcimap(void)
 #endif
 }
 
-void __init loongson2ef_pcibios_init(void)
+static int __init pcibios_init(void)
 {
 	setup_pcimap();
 
-	/*
-	 * ISA-mode only IDE controllers have a hard dependency on ISA IO ports.
-	 *
-	 * Claim them by setting PCI IO space to start at 0x00000000, and set
-	 * PCIBIOS_MIN_IO to prevent non-legacy PCI devices from touching
-	 * reserved regions.
-	 */
-	PCIBIOS_MIN_IO = LOONGSON_PCI_IO_START;
-
 	loongson_pci_controller.io_map_base = mips_io_port_base;
 	register_pci_controller(&loongson_pci_controller);
+
+
+	return 0;
 }
+
+arch_initcall(pcibios_init);

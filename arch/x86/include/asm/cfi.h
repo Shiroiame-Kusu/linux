@@ -111,12 +111,6 @@ extern bhi_thunk __bhi_args_end[];
 
 struct pt_regs;
 
-#ifdef CONFIG_CALL_PADDING
-#define CFI_OFFSET (CONFIG_FUNCTION_PADDING_CFI+5)
-#else
-#define CFI_OFFSET 5
-#endif
-
 #ifdef CONFIG_CFI
 enum bug_trap_type handle_cfi_failure(struct pt_regs *regs);
 #define __bpfcall
@@ -125,9 +119,11 @@ static inline int cfi_get_offset(void)
 {
 	switch (cfi_mode) {
 	case CFI_FINEIBT:
-		return /* fineibt_prefix_size */ 16;
+		return 16;
 	case CFI_KCFI:
-		return CFI_OFFSET;
+		if (IS_ENABLED(CONFIG_CALL_PADDING))
+			return 16;
+		return 5;
 	default:
 		return 0;
 	}

@@ -1310,11 +1310,13 @@ void nvme_mpath_remove_disk(struct nvme_ns_head *head)
 	if (!list_empty(&head->list))
 		goto out;
 
-	/*
-	 * Ensure that no one could remove this module while the head
-	 * remove work is pending.
-	 */
-	if (head->delayed_removal_secs && try_module_get(THIS_MODULE)) {
+	if (head->delayed_removal_secs) {
+		/*
+		 * Ensure that no one could remove this module while the head
+		 * remove work is pending.
+		 */
+		if (!try_module_get(THIS_MODULE))
+			goto out;
 		mod_delayed_work(nvme_wq, &head->remove_work,
 				head->delayed_removal_secs * HZ);
 	} else {

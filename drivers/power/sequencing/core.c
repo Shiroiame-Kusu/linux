@@ -914,10 +914,8 @@ int pwrseq_power_on(struct pwrseq_desc *desc)
 	if (target->post_enable) {
 		ret = target->post_enable(pwrseq);
 		if (ret) {
-			scoped_guard(mutex, &pwrseq->state_lock) {
-				pwrseq_unit_disable(pwrseq, unit);
-				desc->powered_on = false;
-			}
+			pwrseq_unit_disable(pwrseq, unit);
+			desc->powered_on = false;
 		}
 	}
 

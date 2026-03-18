@@ -1949,6 +1949,8 @@ static const struct file_operations constraint_flags_fops = {
 #endif
 };
 
+#define REG_STR_SIZE	64
+
 static void link_and_create_debugfs(struct regulator *regulator, struct regulator_dev *rdev,
 				    struct device *dev)
 {
@@ -1996,7 +1998,15 @@ static struct regulator *create_regulator(struct regulator_dev *rdev,
 	lockdep_assert_held_once(&rdev->mutex.base);
 
 	if (dev) {
-		supply_name = kasprintf(GFP_KERNEL, "%s-%s", dev->kobj.name, supply_name);
+		char buf[REG_STR_SIZE];
+		int size;
+
+		size = snprintf(buf, REG_STR_SIZE, "%s-%s",
+				dev->kobj.name, supply_name);
+		if (size >= REG_STR_SIZE)
+			return NULL;
+
+		supply_name = kstrdup(buf, GFP_KERNEL);
 		if (supply_name == NULL)
 			return NULL;
 	} else {

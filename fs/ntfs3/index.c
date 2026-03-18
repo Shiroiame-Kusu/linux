@@ -1190,12 +1190,7 @@ int indx_find(struct ntfs_index *indx, struct ntfs_inode *ni,
 			return -EINVAL;
 		}
 
-		err = fnd_push(fnd, node, e);
-
-		if (err) {
-			put_indx_node(node);
-			return err;
-		}
+		fnd_push(fnd, node, e);
 	}
 
 	*entry = e;

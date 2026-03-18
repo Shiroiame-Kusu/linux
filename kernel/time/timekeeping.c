@@ -2653,8 +2653,7 @@ static int timekeeping_validate_timex(const struct __kernel_timex *txc, bool aux
 
 	if (aux_clock) {
 		/* Auxiliary clocks are similar to TAI and do not have leap seconds */
-		if (txc->modes & ADJ_STATUS &&
-		    txc->status & (STA_INS | STA_DEL))
+		if (txc->status & (STA_INS | STA_DEL))
 			return -EINVAL;
 
 		/* No TAI offset setting */
@@ -2662,8 +2661,7 @@ static int timekeeping_validate_timex(const struct __kernel_timex *txc, bool aux
 			return -EINVAL;
 
 		/* No PPS support either */
-		if (txc->modes & ADJ_STATUS &&
-		    txc->status & (STA_PPSFREQ | STA_PPSTIME))
+		if (txc->status & (STA_PPSFREQ | STA_PPSTIME))
 			return -EINVAL;
 	}
 

@@ -14,7 +14,6 @@
  *	     tighter packing. Prefetchable range support.
  */
 
-#include <linux/align.h>
 #include <linux/bitops.h>
 #include <linux/bug.h>
 #include <linux/init.h>
@@ -464,7 +463,7 @@ static void reassign_resources_sorted(struct list_head *realloc_head,
 					"%s %pR: ignoring failure in optional allocation\n",
 					res_name, res);
 			}
-		} else if (add_size > 0 || !IS_ALIGNED(res->start, align)) {
+		} else if (add_size > 0) {
 			res->flags |= add_res->flags &
 				 (IORESOURCE_STARTALIGN|IORESOURCE_SIZEALIGN);
 			if (pci_reassign_resource(dev, idx, add_size, align))
@@ -1393,13 +1392,12 @@ static void pbus_size_mem(struct pci_bus *bus, unsigned long type,
 
 	resource_set_range(b_res, min_align, size0);
 	b_res->flags |= IORESOURCE_STARTALIGN;
-	if (bus->self && realloc_head && (size1 > size0 || add_align > min_align)) {
+	if (bus->self && size1 > size0 && realloc_head) {
 		b_res->flags &= ~IORESOURCE_DISABLED;
-		add_size = size1 > size0 ? size1 - size0 : 0;
-		add_to_list(realloc_head, bus->self, b_res, add_size, add_align);
+		add_to_list(realloc_head, bus->self, b_res, size1-size0, add_align);
 		pci_info(bus->self, "bridge window %pR to %pR add_size %llx add_align %llx\n",
 			   b_res, &bus->busn_res,
-			   (unsigned long long) add_size,
+			   (unsigned long long) (size1 - size0),
 			   (unsigned long long) add_align);
 	}
 }
@@ -1684,8 +1682,6 @@ static void pci_claim_bridge_resources(struct pci_dev *dev)
 		struct resource *r = &dev->resource[i];
 
 		if (!r->flags || r->parent)
-			continue;
-		if (r->flags & IORESOURCE_DISABLED)
 			continue;
 
 		pci_claim_bridge_resource(dev, i);

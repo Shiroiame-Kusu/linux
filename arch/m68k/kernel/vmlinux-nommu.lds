@@ -85,7 +85,6 @@ SECTIONS {
 	_end = .;
 
 	STABS_DEBUG
-	MODINFO
 	ELF_DETAILS
 
 	/* Sections to be discarded */

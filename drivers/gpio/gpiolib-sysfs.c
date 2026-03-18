@@ -919,51 +919,6 @@ int gpiod_export_link(struct device *dev, const char *name,
 }
 EXPORT_SYMBOL_GPL(gpiod_export_link);
 
-static void gpiod_unexport_unlocked(struct gpio_desc *desc)
-{
-	struct gpiod_data *tmp, *desc_data = NULL;
-	struct gpiodev_data *gdev_data;
-	struct gpio_device *gdev;
-
-	if (!test_bit(GPIOD_FLAG_EXPORT, &desc->flags))
-		return;
-
-	gdev = gpiod_to_gpio_device(desc);
-	gdev_data = gdev_get_data(gdev);
-	if (!gdev_data)
-		return;
-
-	list_for_each_entry(tmp, &gdev_data->exported_lines, list) {
-		if (gpiod_is_equal(desc, tmp->desc)) {
-			desc_data = tmp;
-			break;
-		}
-	}
-
-	if (!desc_data)
-		return;
-
-	list_del(&desc_data->list);
-	clear_bit(GPIOD_FLAG_EXPORT, &desc->flags);
-#if IS_ENABLED(CONFIG_GPIO_SYSFS_LEGACY)
-	sysfs_put(desc_data->value_kn);
-	device_unregister(desc_data->dev);
-
-	/*
-	 * Release irq after deregistration to prevent race with
-	 * edge_store.
-	 */
-	if (desc_data->irq_flags)
-		gpio_sysfs_free_irq(desc_data);
-#endif /* CONFIG_GPIO_SYSFS_LEGACY */
-
-	sysfs_remove_groups(desc_data->parent,
-			    desc_data->chip_attr_groups);
-
-	mutex_destroy(&desc_data->mutex);
-	kfree(desc_data);
-}
-
 /**
  * gpiod_unexport - reverse effect of gpiod_export()
  * @desc: GPIO to make unavailable
@@ -972,14 +927,54 @@ static void gpiod_unexport_unlocked(struct gpio_desc *desc)
  */
 void gpiod_unexport(struct gpio_desc *desc)
 {
+	struct gpiod_data *tmp, *desc_data = NULL;
+	struct gpiodev_data *gdev_data;
+	struct gpio_device *gdev;
+
 	if (!desc) {
 		pr_warn("%s: invalid GPIO\n", __func__);
 		return;
 	}
 
-	guard(mutex)(&sysfs_lock);
+	scoped_guard(mutex, &sysfs_lock) {
+		if (!test_bit(GPIOD_FLAG_EXPORT, &desc->flags))
+			return;
 
-	gpiod_unexport_unlocked(desc);
+		gdev = gpiod_to_gpio_device(desc);
+		gdev_data = gdev_get_data(gdev);
+		if (!gdev_data)
+			return;
+
+		list_for_each_entry(tmp, &gdev_data->exported_lines, list) {
+			if (gpiod_is_equal(desc, tmp->desc)) {
+				desc_data = tmp;
+				break;
+			}
+		}
+
+		if (!desc_data)
+			return;
+
+		list_del(&desc_data->list);
+		clear_bit(GPIOD_FLAG_EXPORT, &desc->flags);
+#if IS_ENABLED(CONFIG_GPIO_SYSFS_LEGACY)
+		sysfs_put(desc_data->value_kn);
+		device_unregister(desc_data->dev);
+
+		/*
+		 * Release irq after deregistration to prevent race with
+		 * edge_store.
+		 */
+		if (desc_data->irq_flags)
+			gpio_sysfs_free_irq(desc_data);
+#endif /* CONFIG_GPIO_SYSFS_LEGACY */
+
+		sysfs_remove_groups(desc_data->parent,
+				    desc_data->chip_attr_groups);
+	}
+
+	mutex_destroy(&desc_data->mutex);
+	kfree(desc_data);
 }
 EXPORT_SYMBOL_GPL(gpiod_unexport);
 
@@ -1059,28 +1054,29 @@ void gpiochip_sysfs_unregister(struct gpio_device *gdev)
 	struct gpio_desc *desc;
 	struct gpio_chip *chip;
 
-	guard(mutex)(&sysfs_lock);
+	scoped_guard(mutex, &sysfs_lock) {
+		data = gdev_get_data(gdev);
+		if (!data)
+			return;
 
-	data = gdev_get_data(gdev);
-	if (!data)
-		return;
+#if IS_ENABLED(CONFIG_GPIO_SYSFS_LEGACY)
+		device_unregister(data->cdev_base);
+#endif /* CONFIG_GPIO_SYSFS_LEGACY */
+		device_unregister(data->cdev_id);
+		kfree(data);
+	}
 
 	guard(srcu)(&gdev->srcu);
+
 	chip = srcu_dereference(gdev->chip, &gdev->srcu);
 	if (!chip)
 		return;
 
 	/* unregister gpiod class devices owned by sysfs */
 	for_each_gpio_desc_with_flag(chip, desc, GPIOD_FLAG_SYSFS) {
-		gpiod_unexport_unlocked(desc);
+		gpiod_unexport(desc);
 		gpiod_free(desc);
 	}
-
-#if IS_ENABLED(CONFIG_GPIO_SYSFS_LEGACY)
-	device_unregister(data->cdev_base);
-#endif /* CONFIG_GPIO_SYSFS_LEGACY */
-	device_unregister(data->cdev_id);
-	kfree(data);
 }
 
 /*

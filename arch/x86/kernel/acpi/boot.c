@@ -35,7 +35,6 @@
 #include <asm/smp.h>
 #include <asm/i8259.h>
 #include <asm/setup.h>
-#include <asm/hypervisor.h>
 
 #include "sleep.h" /* To include x86_acpi_suspend_lowlevel */
 static int __initdata acpi_force = 0;
@@ -165,14 +164,11 @@ static bool __init acpi_is_processor_usable(u32 lapic_flags)
 	if (lapic_flags & ACPI_MADT_ENABLED)
 		return true;
 
-	if (acpi_support_online_capable)
-		return lapic_flags & ACPI_MADT_ONLINE_CAPABLE;
+	if (!acpi_support_online_capable ||
+	    (lapic_flags & ACPI_MADT_ONLINE_CAPABLE))
+		return true;
 
-	/*
-	 * QEMU expects legacy "Enabled=0" LAPIC entries to be counted as usable
-	 * in order to support CPU hotplug in guests.
-	 */
-	return !hypervisor_is_type(X86_HYPER_NATIVE);
+	return false;
 }
 
 static int __init

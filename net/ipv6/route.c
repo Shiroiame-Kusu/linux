@@ -1063,8 +1063,7 @@ static struct net_device *ip6_rt_get_dev_rcu(const struct fib6_result *res)
 		 */
 		if (netif_is_l3_slave(dev) &&
 		    !rt6_need_strict(&res->f6i->fib6_dst.addr))
-			dev = l3mdev_master_dev_rcu(dev) ? :
-			      dev_net(dev)->loopback_dev;
+			dev = l3mdev_master_dev_rcu(dev);
 		else if (!netif_is_l3_master(dev))
 			dev = dev_net(dev)->loopback_dev;
 		/* last case is netif_is_l3_master(dev) is true in which
@@ -2896,7 +2895,7 @@ static void rt6_do_update_pmtu(struct rt6_info *rt, u32 mtu)
 
 	dst_metric_set(&rt->dst, RTAX_MTU, mtu);
 	rt->rt6i_flags |= RTF_MODIFIED;
-	rt6_update_expires(rt, READ_ONCE(net->ipv6.sysctl.ip6_rt_mtu_expires));
+	rt6_update_expires(rt, net->ipv6.sysctl.ip6_rt_mtu_expires);
 }
 
 static bool rt6_cache_allowed_for_pmtu(const struct rt6_info *rt)
@@ -3257,8 +3256,8 @@ static unsigned int ip6_default_advmss(const struct dst_entry *dst)
 	rcu_read_lock();
 
 	net = dst_dev_net_rcu(dst);
-	mtu = max_t(unsigned int, mtu,
-		    READ_ONCE(net->ipv6.sysctl.ip6_rt_min_advmss));
+	if (mtu < net->ipv6.sysctl.ip6_rt_min_advmss)
+		mtu = net->ipv6.sysctl.ip6_rt_min_advmss;
 
 	rcu_read_unlock();
 
@@ -3360,10 +3359,10 @@ out:
 static void ip6_dst_gc(struct dst_ops *ops)
 {
 	struct net *net = container_of(ops, struct net, ipv6.ip6_dst_ops);
-	int rt_min_interval = READ_ONCE(net->ipv6.sysctl.ip6_rt_gc_min_interval);
-	int rt_elasticity = READ_ONCE(net->ipv6.sysctl.ip6_rt_gc_elasticity);
-	int rt_gc_timeout = READ_ONCE(net->ipv6.sysctl.ip6_rt_gc_timeout);
-	unsigned long rt_last_gc = READ_ONCE(net->ipv6.ip6_rt_last_gc);
+	int rt_min_interval = net->ipv6.sysctl.ip6_rt_gc_min_interval;
+	int rt_elasticity = net->ipv6.sysctl.ip6_rt_gc_elasticity;
+	int rt_gc_timeout = net->ipv6.sysctl.ip6_rt_gc_timeout;
+	unsigned long rt_last_gc = net->ipv6.ip6_rt_last_gc;
 	unsigned int val;
 	int entries;
 
@@ -3584,6 +3583,7 @@ int fib6_nh_init(struct net *net, struct fib6_nh *fib6_nh,
 	netdevice_tracker *dev_tracker = &fib6_nh->fib_nh_dev_tracker;
 	struct net_device *dev = NULL;
 	struct inet6_dev *idev = NULL;
+	int addr_type;
 	int err;
 
 	fib6_nh->fib_nh_family = AF_INET6;
@@ -3625,10 +3625,11 @@ int fib6_nh_init(struct net *net, struct fib6_nh *fib6_nh,
 
 	fib6_nh->fib_nh_weight = 1;
 
-	/* Reset the nexthop device to the loopback device in case of reject
-	 * routes.
+	/* We cannot add true routes via loopback here,
+	 * they would result in kernel looping; promote them to reject routes
 	 */
-	if (cfg->fc_flags & RTF_REJECT) {
+	addr_type = ipv6_addr_type(&cfg->fc_dst);
+	if (fib6_is_reject(cfg->fc_flags, dev, addr_type)) {
 		/* hold loopback dev/idev if we haven't done so. */
 		if (dev != net->loopback_dev) {
 			if (dev) {
@@ -5007,7 +5008,7 @@ void rt6_sync_down_dev(struct net_device *dev, unsigned long event)
 	};
 	struct net *net = dev_net(dev);
 
-	if (READ_ONCE(net->ipv6.sysctl.skip_notify_on_dev_down))
+	if (net->ipv6.sysctl.skip_notify_on_dev_down)
 		fib6_clean_all_skip_notify(net, fib6_ifdown, &arg);
 	else
 		fib6_clean_all(net, fib6_ifdown, &arg);
@@ -6407,7 +6408,6 @@ errout:
 void fib6_info_hw_flags_set(struct net *net, struct fib6_info *f6i,
 			    bool offload, bool trap, bool offload_failed)
 {
-	u8 fib_notify_on_flag_change;
 	struct sk_buff *skb;
 	int err;
 
@@ -6419,9 +6419,8 @@ void fib6_info_hw_flags_set(struct net *net, struct fib6_info *f6i,
 	WRITE_ONCE(f6i->offload, offload);
 	WRITE_ONCE(f6i->trap, trap);
 
-	fib_notify_on_flag_change = READ_ONCE(net->ipv6.sysctl.fib_notify_on_flag_change);
 	/* 2 means send notifications only if offload_failed was changed. */
-	if (fib_notify_on_flag_change == 2 &&
+	if (net->ipv6.sysctl.fib_notify_on_flag_change == 2 &&
 	    READ_ONCE(f6i->offload_failed) == offload_failed)
 		return;
 
@@ -6433,7 +6432,7 @@ void fib6_info_hw_flags_set(struct net *net, struct fib6_info *f6i,
 		 */
 		return;
 
-	if (!fib_notify_on_flag_change)
+	if (!net->ipv6.sysctl.fib_notify_on_flag_change)
 		return;
 
 	skb = nlmsg_new(rt6_nlmsg_size(f6i), GFP_KERNEL);
@@ -6530,7 +6529,7 @@ static int ipv6_sysctl_rtcache_flush(const struct ctl_table *ctl, int write,
 		return ret;
 
 	net = (struct net *)ctl->extra1;
-	delay = READ_ONCE(net->ipv6.sysctl.flush_delay);
+	delay = net->ipv6.sysctl.flush_delay;
 	fib6_run_gc(delay <= 0 ? 0 : (unsigned long)delay, net, delay > 0);
 	return 0;
 }

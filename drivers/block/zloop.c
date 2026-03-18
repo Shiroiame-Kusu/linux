@@ -542,21 +542,6 @@ out:
 	zloop_put_cmd(cmd);
 }
 
-/*
- * Sync the entire FS containing the zone files instead of walking all files.
- */
-static int zloop_flush(struct zloop_device *zlo)
-{
-	struct super_block *sb = file_inode(zlo->data_dir)->i_sb;
-	int ret;
-
-	down_read(&sb->s_umount);
-	ret = sync_filesystem(sb);
-	up_read(&sb->s_umount);
-
-	return ret;
-}
-
 static void zloop_handle_cmd(struct zloop_cmd *cmd)
 {
 	struct request *rq = blk_mq_rq_from_pdu(cmd);
@@ -577,7 +562,11 @@ static void zloop_handle_cmd(struct zloop_cmd *cmd)
 		zloop_rw(cmd);
 		return;
 	case REQ_OP_FLUSH:
-		cmd->ret = zloop_flush(zlo);
+		/*
+		 * Sync the entire FS containing the zone files instead of
+		 * walking all files
+		 */
+		cmd->ret = sync_filesystem(file_inode(zlo->data_dir)->i_sb);
 		break;
 	case REQ_OP_ZONE_RESET:
 		cmd->ret = zloop_reset_zone(zlo, rq_zone_no(rq));
@@ -992,8 +981,7 @@ static int zloop_ctl_add(struct zloop_options *opts)
 	struct queue_limits lim = {
 		.max_hw_sectors		= SZ_1M >> SECTOR_SHIFT,
 		.chunk_sectors		= opts->zone_size,
-		.features		= BLK_FEAT_ZONED | BLK_FEAT_WRITE_CACHE,
-
+		.features		= BLK_FEAT_ZONED,
 	};
 	unsigned int nr_zones, i, j;
 	struct zloop_device *zlo;
@@ -1174,12 +1162,7 @@ static int zloop_ctl_remove(struct zloop_options *opts)
 	int ret;
 
 	if (!(opts->mask & ZLOOP_OPT_ID)) {
-		pr_err("No ID specified for remove\n");
-		return -EINVAL;
-	}
-
-	if (opts->mask & ~ZLOOP_OPT_ID) {
-		pr_err("Invalid option specified for remove\n");
+		pr_err("No ID specified\n");
 		return -EINVAL;
 	}
 

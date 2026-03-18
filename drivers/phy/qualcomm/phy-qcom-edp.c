@@ -103,9 +103,7 @@ struct qcom_edp {
 
 	struct phy_configure_opts_dp dp_opts;
 
-	struct clk_bulk_data *clks;
-	int num_clks;
-
+	struct clk_bulk_data clks[2];
 	struct regulator_bulk_data supplies[2];
 
 	bool is_edp;
@@ -220,7 +218,7 @@ static int qcom_edp_phy_init(struct phy *phy)
 	if (ret)
 		return ret;
 
-	ret = clk_bulk_prepare_enable(edp->num_clks, edp->clks);
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(edp->clks), edp->clks);
 	if (ret)
 		goto out_disable_supplies;
 
@@ -887,7 +885,7 @@ static int qcom_edp_phy_exit(struct phy *phy)
 {
 	struct qcom_edp *edp = phy_get_drvdata(phy);
 
-	clk_bulk_disable_unprepare(edp->num_clks, edp->clks);
+	clk_bulk_disable_unprepare(ARRAY_SIZE(edp->clks), edp->clks);
 	regulator_bulk_disable(ARRAY_SIZE(edp->supplies), edp->supplies);
 
 	return 0;
@@ -1094,9 +1092,11 @@ static int qcom_edp_phy_probe(struct platform_device *pdev)
 	if (IS_ERR(edp->pll))
 		return PTR_ERR(edp->pll);
 
-	edp->num_clks = devm_clk_bulk_get_all(dev, &edp->clks);
-	if (edp->num_clks < 0)
-		return dev_err_probe(dev, edp->num_clks, "failed to get clocks\n");
+	edp->clks[0].id = "aux";
+	edp->clks[1].id = "cfg_ahb";
+	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(edp->clks), edp->clks);
+	if (ret)
+		return ret;
 
 	edp->supplies[0].supply = "vdda-phy";
 	edp->supplies[1].supply = "vdda-pll";

@@ -12,6 +12,8 @@
 
 #include "fb_internal.h"
 
+#define FB_SYSFS_FLAG_ATTR 1
+
 static int activate(struct fb_info *fb_info, struct fb_var_screeninfo *var)
 {
 	int err;
@@ -449,7 +451,33 @@ static struct attribute *fb_device_attrs[] = {
 	NULL,
 };
 
-ATTRIBUTE_GROUPS(fb_device);
+static const struct attribute_group fb_device_attr_group = {
+	.attrs          = fb_device_attrs,
+};
+
+static int fb_init_device(struct fb_info *fb_info)
+{
+	int ret;
+
+	dev_set_drvdata(fb_info->dev, fb_info);
+
+	fb_info->class_flag |= FB_SYSFS_FLAG_ATTR;
+
+	ret = device_add_group(fb_info->dev, &fb_device_attr_group);
+	if (ret)
+		fb_info->class_flag &= ~FB_SYSFS_FLAG_ATTR;
+
+	return 0;
+}
+
+static void fb_cleanup_device(struct fb_info *fb_info)
+{
+	if (fb_info->class_flag & FB_SYSFS_FLAG_ATTR) {
+		device_remove_group(fb_info->dev, &fb_device_attr_group);
+
+		fb_info->class_flag &= ~FB_SYSFS_FLAG_ATTR;
+	}
+}
 
 int fb_device_create(struct fb_info *fb_info)
 {
@@ -457,13 +485,14 @@ int fb_device_create(struct fb_info *fb_info)
 	dev_t devt = MKDEV(FB_MAJOR, node);
 	int ret;
 
-	fb_info->dev = device_create_with_groups(fb_class, fb_info->device, devt, fb_info,
-						 fb_device_groups, "fb%d", node);
+	fb_info->dev = device_create(fb_class, fb_info->device, devt, NULL, "fb%d", node);
 	if (IS_ERR(fb_info->dev)) {
 		/* Not fatal */
 		ret = PTR_ERR(fb_info->dev);
 		pr_warn("Unable to create device for framebuffer %d; error %d\n", node, ret);
 		fb_info->dev = NULL;
+	} else {
+		fb_init_device(fb_info);
 	}
 
 	return 0;
@@ -476,6 +505,7 @@ void fb_device_destroy(struct fb_info *fb_info)
 	if (!fb_info->dev)
 		return;
 
+	fb_cleanup_device(fb_info);
 	device_destroy(fb_class, devt);
 	fb_info->dev = NULL;
 }

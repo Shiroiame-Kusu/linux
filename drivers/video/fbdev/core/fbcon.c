@@ -1068,8 +1068,7 @@ static void fbcon_init(struct vc_data *vc, bool init)
 		return;
 
 	if (!info->fbcon_par)
-		if (con2fb_acquire_newinfo(vc, info, vc->vc_num))
-			return;
+		con2fb_acquire_newinfo(vc, info, vc->vc_num);
 
 	/* If we are not the first console on this
 	   fb, copy the font from that console */

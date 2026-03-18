@@ -350,21 +350,7 @@ EXPORT_SYMBOL_GPL(unwind_start);
 
 static inline unsigned long bt_address(unsigned long ra)
 {
-#if defined(CONFIG_NUMA) && !defined(CONFIG_PREEMPT_RT)
-	int cpu;
-	int vec_sz = sizeof(exception_handlers);
-
-	for_each_possible_cpu(cpu) {
-		if (!pcpu_handlers[cpu])
-			continue;
-
-		if (ra >= pcpu_handlers[cpu] &&
-		    ra < pcpu_handlers[cpu] + vec_sz) {
-			ra = ra + eentry - pcpu_handlers[cpu];
-			break;
-		}
-	}
-#endif
+	extern unsigned long eentry;
 
 	if (ra >= eentry && ra < eentry +  EXCCODE_INT_END * VECSIZE) {
 		unsigned long func;
@@ -508,7 +494,7 @@ bool unwind_next_frame(struct unwind_state *state)
 
 	state->pc = bt_address(pc);
 	if (!state->pc) {
-		pr_err("cannot find unwind pc at %px\n", (void *)pc);
+		pr_err("cannot find unwind pc at %p\n", (void *)pc);
 		goto err;
 	}
 

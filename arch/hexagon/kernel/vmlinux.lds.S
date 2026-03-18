@@ -62,7 +62,6 @@ SECTIONS
 
 	STABS_DEBUG
 	DWARF_DEBUG
-	MODINFO
 	ELF_DETAILS
 	.hexagon.attributes 0 : { *(.hexagon.attributes) }
 

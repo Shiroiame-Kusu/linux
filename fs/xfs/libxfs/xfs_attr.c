@@ -50,6 +50,7 @@ STATIC int xfs_attr_shortform_addname(xfs_da_args_t *args);
  */
 STATIC int xfs_attr_leaf_get(xfs_da_args_t *args);
 STATIC int xfs_attr_leaf_removename(xfs_da_args_t *args);
+STATIC int xfs_attr_leaf_hasname(struct xfs_da_args *args, struct xfs_buf **bp);
 
 /*
  * Internal routines when attribute list is more than one block.
@@ -978,12 +979,11 @@ xfs_attr_lookup(
 		return error;
 
 	if (xfs_attr_is_leaf(dp)) {
-		error = xfs_attr3_leaf_read(args->trans, args->dp, args->owner,
-				0, &bp);
-		if (error)
-			return error;
-		error = xfs_attr3_leaf_lookup_int(bp, args);
-		xfs_trans_brelse(args->trans, bp);
+		error = xfs_attr_leaf_hasname(args, &bp);
+
+		if (bp)
+			xfs_trans_brelse(args->trans, bp);
+
 		return error;
 	}
 
@@ -1223,6 +1223,27 @@ xfs_attr_shortform_addname(
  *========================================================================*/
 
 /*
+ * Return EEXIST if attr is found, or ENOATTR if not
+ */
+STATIC int
+xfs_attr_leaf_hasname(
+	struct xfs_da_args	*args,
+	struct xfs_buf		**bp)
+{
+	int                     error = 0;
+
+	error = xfs_attr3_leaf_read(args->trans, args->dp, args->owner, 0, bp);
+	if (error)
+		return error;
+
+	error = xfs_attr3_leaf_lookup_int(*bp, args);
+	if (error != -ENOATTR && error != -EEXIST)
+		xfs_trans_brelse(args->trans, *bp);
+
+	return error;
+}
+
+/*
  * Remove a name from the leaf attribute list structure
  *
  * This leaf block cannot have a "remote" value, we only call this routine
@@ -1232,22 +1253,25 @@ STATIC int
 xfs_attr_leaf_removename(
 	struct xfs_da_args	*args)
 {
-	struct xfs_inode	*dp = args->dp;
-	int			error, forkoff;
+	struct xfs_inode	*dp;
 	struct xfs_buf		*bp;
+	int			error, forkoff;
 
 	trace_xfs_attr_leaf_removename(args);
 
-	error = xfs_attr3_leaf_read(args->trans, args->dp, args->owner, 0, &bp);
-	if (error)
-		return error;
-	error = xfs_attr3_leaf_lookup_int(bp, args);
-	if (error != -EEXIST) {
+	/*
+	 * Remove the attribute.
+	 */
+	dp = args->dp;
+
+	error = xfs_attr_leaf_hasname(args, &bp);
+	if (error == -ENOATTR) {
 		xfs_trans_brelse(args->trans, bp);
-		if (error == -ENOATTR && (args->op_flags & XFS_DA_OP_RECOVERY))
+		if (args->op_flags & XFS_DA_OP_RECOVERY)
 			return 0;
 		return error;
-	}
+	} else if (error != -EEXIST)
+		return error;
 
 	xfs_attr3_leaf_remove(bp, args);
 
@@ -1271,20 +1295,23 @@ xfs_attr_leaf_removename(
  * Returns 0 on successful retrieval, otherwise an error.
  */
 STATIC int
-xfs_attr_leaf_get(
-	struct xfs_da_args	*args)
+xfs_attr_leaf_get(xfs_da_args_t *args)
 {
-	struct xfs_buf		*bp;
-	int			error;
+	struct xfs_buf *bp;
+	int error;
 
 	trace_xfs_attr_leaf_get(args);
 
-	error = xfs_attr3_leaf_read(args->trans, args->dp, args->owner, 0, &bp);
-	if (error)
+	error = xfs_attr_leaf_hasname(args, &bp);
+
+	if (error == -ENOATTR)  {
+		xfs_trans_brelse(args->trans, bp);
 		return error;
-	error = xfs_attr3_leaf_lookup_int(bp, args);
-	if (error == -EEXIST)
-		error = xfs_attr3_leaf_getvalue(bp, args);
+	} else if (error != -EEXIST)
+		return error;
+
+
+	error = xfs_attr3_leaf_getvalue(bp, args);
 	xfs_trans_brelse(args->trans, bp);
 	return error;
 }

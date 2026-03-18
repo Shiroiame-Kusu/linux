@@ -217,7 +217,6 @@ SECTIONS
 
 	STABS_DEBUG
 	DWARF_DEBUG
-	MODINFO
 	ELF_DETAILS
 
 	/* These must appear regardless of  .  */

@@ -1252,12 +1252,6 @@ int ntfs_read_run_nb(struct ntfs_sb_info *sbi, const struct runs_tree *run,
 
 		} while (len32);
 
-		if (!run) {
-			err = -EINVAL;
-			goto out;
-		}
-
-		/* Get next fragment to read. */
 		vcn_next = vcn + clen;
 		if (!run_get_entry(run, ++idx, &vcn, &lcn, &clen) ||
 		    vcn != vcn_next) {
@@ -2633,7 +2627,7 @@ int ntfs_set_label(struct ntfs_sb_info *sbi, u8 *label, int len)
 	u32 uni_bytes;
 	struct ntfs_inode *ni = sbi->volume.ni;
 	/* Allocate PATH_MAX bytes. */
-	struct cpu_str *uni = kmalloc(PATH_MAX, GFP_KERNEL);
+	struct cpu_str *uni = __getname();
 
 	if (!uni)
 		return -ENOMEM;
@@ -2677,6 +2671,6 @@ unlock_out:
 		err = _ni_write_inode(&ni->vfs_inode, 0);
 
 out:
-	kfree(uni);
+	__putname(uni);
 	return err;
 }

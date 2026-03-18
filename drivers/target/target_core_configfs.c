@@ -108,8 +108,8 @@ static ssize_t target_core_item_dbroot_store(struct config_item *item,
 					const char *page, size_t count)
 {
 	ssize_t read_bytes;
+	struct file *fp;
 	ssize_t r = -EINVAL;
-	struct path path = {};
 
 	mutex_lock(&target_devices_lock);
 	if (target_devices) {
@@ -131,14 +131,17 @@ static ssize_t target_core_item_dbroot_store(struct config_item *item,
 		db_root_stage[read_bytes - 1] = '\0';
 
 	/* validate new db root before accepting it */
-	r = kern_path(db_root_stage, LOOKUP_FOLLOW | LOOKUP_DIRECTORY, &path);
-	if (r) {
+	fp = filp_open(db_root_stage, O_RDONLY, 0);
+	if (IS_ERR(fp)) {
 		pr_err("db_root: cannot open: %s\n", db_root_stage);
-		if (r == -ENOTDIR)
-			pr_err("db_root: not a directory: %s\n", db_root_stage);
 		goto unlock;
 	}
-	path_put(&path);
+	if (!S_ISDIR(file_inode(fp)->i_mode)) {
+		filp_close(fp, NULL);
+		pr_err("db_root: not a directory: %s\n", db_root_stage);
+		goto unlock;
+	}
+	filp_close(fp, NULL);
 
 	strscpy(db_root, db_root_stage);
 	pr_debug("Target_Core_ConfigFS: db_root set to %s\n", db_root);

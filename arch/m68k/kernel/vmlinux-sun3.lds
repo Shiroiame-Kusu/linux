@@ -51,7 +51,6 @@ __init_begin = .;
   _end = . ;
 
   STABS_DEBUG
-  MODINFO
   ELF_DETAILS
 
   /* Sections to be discarded */

@@ -2099,11 +2099,11 @@ static bool is_reclaim_urgent(struct btrfs_space_info *space_info)
 	return unalloc < data_chunk_size;
 }
 
-static bool do_reclaim_sweep(struct btrfs_space_info *space_info, int raid)
+static void do_reclaim_sweep(struct btrfs_space_info *space_info, int raid)
 {
 	struct btrfs_block_group *bg;
 	int thresh_pct;
-	bool will_reclaim = false;
+	bool try_again = true;
 	bool urgent;
 
 	spin_lock(&space_info->lock);
@@ -2121,7 +2121,7 @@ again:
 		spin_lock(&bg->lock);
 		thresh = mult_perc(bg->length, thresh_pct);
 		if (bg->used < thresh && bg->reclaim_mark) {
-			will_reclaim = true;
+			try_again = false;
 			reclaim = true;
 		}
 		bg->reclaim_mark++;
@@ -2138,13 +2138,12 @@ again:
 	 * If we have any staler groups, we don't touch the fresher ones, but if we
 	 * really need a block group, do take a fresh one.
 	 */
-	if (!will_reclaim && urgent) {
-		urgent = false;
+	if (try_again && urgent) {
+		try_again = false;
 		goto again;
 	}
 
 	up_read(&space_info->groups_sem);
-	return will_reclaim;
 }
 
 void btrfs_space_info_update_reclaimable(struct btrfs_space_info *space_info, s64 bytes)
@@ -2154,8 +2153,7 @@ void btrfs_space_info_update_reclaimable(struct btrfs_space_info *space_info, s6
 	lockdep_assert_held(&space_info->lock);
 	space_info->reclaimable_bytes += bytes;
 
-	if (space_info->reclaimable_bytes > 0 &&
-	    space_info->reclaimable_bytes >= chunk_sz)
+	if (space_info->reclaimable_bytes >= chunk_sz)
 		btrfs_set_periodic_reclaim_ready(space_info, true);
 }
 
@@ -2182,6 +2180,7 @@ static bool btrfs_should_periodic_reclaim(struct btrfs_space_info *space_info)
 
 	spin_lock(&space_info->lock);
 	ret = space_info->periodic_reclaim_ready;
+	btrfs_set_periodic_reclaim_ready(space_info, false);
 	spin_unlock(&space_info->lock);
 
 	return ret;
@@ -2195,10 +2194,8 @@ void btrfs_reclaim_sweep(const struct btrfs_fs_info *fs_info)
 	list_for_each_entry(space_info, &fs_info->space_info, list) {
 		if (!btrfs_should_periodic_reclaim(space_info))
 			continue;
-		for (raid = 0; raid < BTRFS_NR_RAID_TYPES; raid++) {
-			if (do_reclaim_sweep(space_info, raid))
-				btrfs_set_periodic_reclaim_ready(space_info, false);
-		}
+		for (raid = 0; raid < BTRFS_NR_RAID_TYPES; raid++)
+			do_reclaim_sweep(space_info, raid);
 	}
 }
 

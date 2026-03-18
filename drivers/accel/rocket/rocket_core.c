@@ -59,11 +59,8 @@ int rocket_core_init(struct rocket_core *core)
 	core->iommu_group = iommu_group_get(dev);
 
 	err = rocket_job_init(core);
-	if (err) {
-		iommu_group_put(core->iommu_group);
-		core->iommu_group = NULL;
+	if (err)
 		return err;
-	}
 
 	pm_runtime_use_autosuspend(dev);
 
@@ -79,7 +76,7 @@ int rocket_core_init(struct rocket_core *core)
 
 	err = pm_runtime_resume_and_get(dev);
 	if (err) {
-		rocket_core_fini(core);
+		rocket_job_fini(core);
 		return err;
 	}
 

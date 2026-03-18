@@ -1472,7 +1472,7 @@ static void cpsw_unregister_ports(struct cpsw_common *cpsw)
 
 	for (i = 0; i < cpsw->data.slaves; i++) {
 		ndev = cpsw->slaves[i].ndev;
-		if (!ndev || ndev->reg_state != NETREG_REGISTERED)
+		if (!ndev)
 			continue;
 
 		priv = netdev_priv(ndev);
@@ -1494,6 +1494,7 @@ static int cpsw_register_ports(struct cpsw_common *cpsw)
 		if (ret) {
 			dev_err(cpsw->dev,
 				"cpsw: err registering net device%d\n", i);
+			cpsw->slaves[i].ndev = NULL;
 			break;
 		}
 	}
@@ -2002,7 +2003,7 @@ static int cpsw_probe(struct platform_device *pdev)
 	/* setup netdevs */
 	ret = cpsw_create_ports(cpsw);
 	if (ret)
-		goto clean_cpts;
+		goto clean_unregister_netdev;
 
 	/* Grab RX and TX IRQs. Note that we also have RX_THRESHOLD and
 	 * MISC IRQs which are always kept disabled with this driver so
@@ -2016,14 +2017,14 @@ static int cpsw_probe(struct platform_device *pdev)
 			       0, dev_name(dev), cpsw);
 	if (ret < 0) {
 		dev_err(dev, "error attaching irq (%d)\n", ret);
-		goto clean_cpts;
+		goto clean_unregister_netdev;
 	}
 
 	ret = devm_request_irq(dev, cpsw->irqs_table[1], cpsw_tx_interrupt,
 			       0, dev_name(dev), cpsw);
 	if (ret < 0) {
 		dev_err(dev, "error attaching irq (%d)\n", ret);
-		goto clean_cpts;
+		goto clean_unregister_netdev;
 	}
 
 	if (!cpsw->cpts)
@@ -2033,7 +2034,7 @@ static int cpsw_probe(struct platform_device *pdev)
 			       0, dev_name(&pdev->dev), cpsw);
 	if (ret < 0) {
 		dev_err(dev, "error attaching misc irq (%d)\n", ret);
-		goto clean_cpts;
+		goto clean_unregister_netdev;
 	}
 
 	/* Enable misc CPTS evnt_pend IRQ */
@@ -2042,7 +2043,7 @@ static int cpsw_probe(struct platform_device *pdev)
 skip_cpts:
 	ret = cpsw_register_notifiers(cpsw);
 	if (ret)
-		goto clean_cpts;
+		goto clean_unregister_netdev;
 
 	ret = cpsw_register_devlink(cpsw);
 	if (ret)
@@ -2064,6 +2065,8 @@ skip_cpts:
 
 clean_unregister_notifiers:
 	cpsw_unregister_notifiers(cpsw);
+clean_unregister_netdev:
+	cpsw_unregister_ports(cpsw);
 clean_cpts:
 	cpts_release(cpsw->cpts);
 	cpdma_ctlr_destroy(cpsw->dma);

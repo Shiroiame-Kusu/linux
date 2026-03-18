@@ -330,13 +330,12 @@ static int erofs_read_superblock(struct super_block *sb)
 	}
 	sbi->packed_nid = le64_to_cpu(dsb->packed_nid);
 	if (erofs_sb_has_metabox(sbi)) {
-		ret = -EFSCORRUPTED;
 		if (sbi->sb_size <= offsetof(struct erofs_super_block,
 					     metabox_nid))
-			goto out;
+			return -EFSCORRUPTED;
 		sbi->metabox_nid = le64_to_cpu(dsb->metabox_nid);
 		if (sbi->metabox_nid & BIT_ULL(EROFS_DIRENT_NID_METABOX_BIT))
-			goto out;		/* self-loop detection */
+			return -EFSCORRUPTED;	/* self-loop detection */
 	}
 	sbi->inos = le64_to_cpu(dsb->inos);
 
@@ -347,10 +346,8 @@ static int erofs_read_superblock(struct super_block *sb)
 	if (dsb->volume_name[0]) {
 		sbi->volume_name = kstrndup(dsb->volume_name,
 					    sizeof(dsb->volume_name), GFP_KERNEL);
-		if (!sbi->volume_name) {
-			ret = -ENOMEM;
-			goto out;
-		}
+		if (!sbi->volume_name)
+			return -ENOMEM;
 	}
 
 	/* parse on-disk compression configurations */

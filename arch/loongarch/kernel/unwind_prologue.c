@@ -23,6 +23,10 @@ extern const int unwind_hint_lasx;
 extern const int unwind_hint_lbt;
 extern const int unwind_hint_ri;
 extern const int unwind_hint_watch;
+extern unsigned long eentry;
+#ifdef CONFIG_NUMA
+extern unsigned long pcpu_handlers[NR_CPUS];
+#endif
 
 static inline bool scan_handlers(unsigned long entry_offset)
 {
@@ -61,7 +65,7 @@ static inline bool scan_handlers(unsigned long entry_offset)
 
 static inline bool fix_exception(unsigned long pc)
 {
-#if defined(CONFIG_NUMA) && !defined(CONFIG_PREEMPT_RT)
+#ifdef CONFIG_NUMA
 	int cpu;
 
 	for_each_possible_cpu(cpu) {

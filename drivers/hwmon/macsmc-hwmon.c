@@ -22,7 +22,6 @@
 
 #include <linux/bitfield.h>
 #include <linux/hwmon.h>
-#include <linux/math64.h>
 #include <linux/mfd/macsmc.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -131,7 +130,7 @@ static int macsmc_hwmon_read_ioft_scaled(struct apple_smc *smc, smc_key key,
 	if (ret < 0)
 		return ret;
 
-	*p = mul_u64_u32_div(val, scale, 65536);
+	*p = mult_frac(val, scale, 65536);
 
 	return 0;
 }
@@ -141,7 +140,7 @@ static int macsmc_hwmon_read_ioft_scaled(struct apple_smc *smc, smc_key key,
  * them.
  */
 static int macsmc_hwmon_read_f32_scaled(struct apple_smc *smc, smc_key key,
-					long *p, int scale)
+					int *p, int scale)
 {
 	u32 fval;
 	u64 val;
@@ -163,21 +162,21 @@ static int macsmc_hwmon_read_f32_scaled(struct apple_smc *smc, smc_key key,
 		val = 0;
 	else if (exp < 0)
 		val >>= -exp;
-	else if (exp != 0 && (val & ~((1ULL << (64 - exp)) - 1))) /* overflow */
+	else if (exp != 0 && (val & ~((1UL << (64 - exp)) - 1))) /* overflow */
 		val = U64_MAX;
 	else
 		val <<= exp;
 
 	if (fval & FLT_SIGN_MASK) {
-		if (val > (u64)LONG_MAX + 1)
-			*p = LONG_MIN;
+		if (val > (-(s64)INT_MIN))
+			*p = INT_MIN;
 		else
-			*p = -(long)val;
+			*p = -val;
 	} else {
-		if (val > (u64)LONG_MAX)
-			*p = LONG_MAX;
+		if (val > INT_MAX)
+			*p = INT_MAX;
 		else
-			*p = (long)val;
+			*p = val;
 	}
 
 	return 0;
@@ -196,7 +195,7 @@ static int macsmc_hwmon_read_key(struct apple_smc *smc,
 	switch (sensor->info.type_code) {
 	/* 32-bit IEEE 754 float */
 	case __SMC_KEY('f', 'l', 't', ' '): {
-		long flt_ = 0;
+		u32 flt_ = 0;
 
 		ret = macsmc_hwmon_read_f32_scaled(smc, sensor->macsmc_key,
 						   &flt_, scale);
@@ -215,10 +214,7 @@ static int macsmc_hwmon_read_key(struct apple_smc *smc,
 		if (ret)
 			return ret;
 
-		if (ioft > LONG_MAX)
-			*val = LONG_MAX;
-		else
-			*val = (long)ioft;
+		*val = (long)ioft;
 		break;
 	}
 	default:
@@ -228,26 +224,29 @@ static int macsmc_hwmon_read_key(struct apple_smc *smc,
 	return 0;
 }
 
-static int macsmc_hwmon_write_f32(struct apple_smc *smc, smc_key key, long value)
+static int macsmc_hwmon_write_f32(struct apple_smc *smc, smc_key key, int value)
 {
 	u64 val;
 	u32 fval = 0;
-	int exp, neg;
+	int exp = 0, neg;
 
-	neg = value < 0;
 	val = abs(value);
+	neg = val != value;
 
 	if (val) {
-		exp = __fls(val);
+		int msb = __fls(val) - exp;
 
-		if (exp > 23)
-			val >>= exp - 23;
-		else
-			val <<= 23 - exp;
+		if (msb > 23) {
+			val >>= msb - FLT_MANT_BIAS;
+			exp -= msb - FLT_MANT_BIAS;
+		} else if (msb < 23) {
+			val <<= FLT_MANT_BIAS - msb;
+			exp += msb;
+		}
 
 		fval = FIELD_PREP(FLT_SIGN_MASK, neg) |
 		       FIELD_PREP(FLT_EXP_MASK, exp + FLT_EXP_BIAS) |
-		       FIELD_PREP(FLT_MANT_MASK, val & FLT_MANT_MASK);
+		       FIELD_PREP(FLT_MANT_MASK, val);
 	}
 
 	return apple_smc_write_u32(smc, key, fval);
@@ -664,8 +663,8 @@ static int macsmc_hwmon_populate_sensors(struct macsmc_hwmon *hwmon,
 		if (!hwmon->volt.sensors)
 			return -ENOMEM;
 
-		for_each_child_of_node_with_prefix(hwmon_node, key_node, "voltage-") {
-			sensor = &hwmon->volt.sensors[hwmon->volt.count];
+		for_each_child_of_node_with_prefix(hwmon_node, key_node, "volt-") {
+			sensor = &hwmon->temp.sensors[hwmon->temp.count];
 			if (!macsmc_hwmon_create_sensor(hwmon->dev, hwmon->smc, key_node, sensor)) {
 				sensor->attrs = HWMON_I_INPUT;
 

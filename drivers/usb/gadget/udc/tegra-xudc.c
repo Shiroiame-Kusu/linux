@@ -3392,18 +3392,17 @@ static void tegra_xudc_device_params_init(struct tegra_xudc *xudc)
 {
 	u32 val, imod;
 
-	val = xudc_readl(xudc, BLCG);
 	if (xudc->soc->has_ipfs) {
+		val = xudc_readl(xudc, BLCG);
 		val |= BLCG_ALL;
 		val &= ~(BLCG_DFPCI | BLCG_UFPCI | BLCG_FE |
 				BLCG_COREPLL_PWRDN);
 		val |= BLCG_IOPLL_0_PWRDN;
 		val |= BLCG_IOPLL_1_PWRDN;
 		val |= BLCG_IOPLL_2_PWRDN;
-	} else {
-		val &= ~BLCG_COREPLL_PWRDN;
+
+		xudc_writel(xudc, val, BLCG);
 	}
-	xudc_writel(xudc, val, BLCG);
 
 	if (xudc->soc->port_speed_quirk)
 		tegra_xudc_limit_port_speed(xudc);
@@ -3954,7 +3953,6 @@ static void tegra_xudc_remove(struct platform_device *pdev)
 static int __maybe_unused tegra_xudc_powergate(struct tegra_xudc *xudc)
 {
 	unsigned long flags;
-	u32 val;
 
 	dev_dbg(xudc->dev, "entering ELPG\n");
 
@@ -3966,10 +3964,6 @@ static int __maybe_unused tegra_xudc_powergate(struct tegra_xudc *xudc)
 	xudc_writel(xudc, 0, CTRL);
 
 	spin_unlock_irqrestore(&xudc->lock, flags);
-
-	val = xudc_readl(xudc, BLCG);
-	val |= BLCG_COREPLL_PWRDN;
-	xudc_writel(xudc, val, BLCG);
 
 	clk_bulk_disable_unprepare(xudc->soc->num_clks, xudc->clks);
 

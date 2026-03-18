@@ -4445,7 +4445,7 @@ brcmf_sdio_prepare_fw_request(struct brcmf_sdio *bus)
 	return fwreq;
 }
 
-int brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev)
+struct brcmf_sdio *brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev)
 {
 	int ret;
 	struct brcmf_sdio *bus;
@@ -4551,12 +4551,11 @@ int brcmf_sdio_probe(struct brcmf_sdio_dev *sdiodev)
 		goto fail;
 	}
 
-	return 0;
+	return bus;
 
 fail:
 	brcmf_sdio_remove(bus);
-	sdiodev->bus = NULL;
-	return ret;
+	return ERR_PTR(ret);
 }
 
 /* Detach and free everything */

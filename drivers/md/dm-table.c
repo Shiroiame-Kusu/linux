@@ -1237,6 +1237,9 @@ static int dm_wrappedkey_op_callback(struct dm_target *ti, struct dm_dev *dev,
 		bdev_get_queue(bdev)->crypto_profile;
 	int err = -EOPNOTSUPP;
 
+	if (!args->err)
+		return 0;
+
 	switch (args->op) {
 	case DERIVE_SW_SECRET:
 		err = blk_crypto_derive_sw_secret(
@@ -1263,7 +1266,9 @@ static int dm_wrappedkey_op_callback(struct dm_target *ti, struct dm_dev *dev,
 		break;
 	}
 	args->err = err;
-	return 1; /* No need to continue the iteration. */
+
+	/* Try another device in case this fails. */
+	return 0;
 }
 
 static int dm_exec_wrappedkey_op(struct blk_crypto_profile *profile,
@@ -1289,13 +1294,14 @@ static int dm_exec_wrappedkey_op(struct blk_crypto_profile *profile,
 	 * declared on all underlying devices.  Thus, all the underlying devices
 	 * should support all wrapped key operations and they should behave
 	 * identically, i.e. work with the same keys.  So, just executing the
-	 * operation on the first device suffices for now.
+	 * operation on the first device on which it works suffices for now.
 	 */
 	for (i = 0; i < t->num_targets; i++) {
 		ti = dm_table_get_target(t, i);
 		if (!ti->type->iterate_devices)
 			continue;
-		if (ti->type->iterate_devices(ti, dm_wrappedkey_op_callback, args) != 0)
+		ti->type->iterate_devices(ti, dm_wrappedkey_op_callback, args);
+		if (!args->err)
 			break;
 	}
 out:

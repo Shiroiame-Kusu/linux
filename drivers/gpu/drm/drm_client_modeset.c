@@ -930,8 +930,7 @@ int drm_client_modeset_probe(struct drm_client_dev *client, unsigned int width, 
 	mutex_unlock(&client->modeset_mutex);
 out:
 	kfree(crtcs);
-	if (modes)
-		modes_destroy(dev, modes, connector_count);
+	modes_destroy(dev, modes, connector_count);
 	kfree(modes);
 	kfree(offsets);
 	kfree(enabled);

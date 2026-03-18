@@ -819,10 +819,8 @@ static void usbhs_omap_remove(struct platform_device *pdev)
 {
 	pm_runtime_disable(&pdev->dev);
 
-	if (pdev->dev.of_node)
-		of_platform_depopulate(&pdev->dev);
-	else
-		device_for_each_child(&pdev->dev, NULL, usbhs_omap_remove_child);
+	/* remove children */
+	device_for_each_child(&pdev->dev, NULL, usbhs_omap_remove_child);
 }
 
 static const struct dev_pm_ops usbhsomap_dev_pm_ops = {

@@ -27,5 +27,4 @@ EXPORT_SYMBOL(__wbflush);
 
 void __init plat_mem_setup(void)
 {
-	loongson2ef_pcibios_init();
 }

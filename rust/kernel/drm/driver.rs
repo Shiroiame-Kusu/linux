@@ -121,6 +121,7 @@ pub trait Driver {
 pub struct Registration<T: Driver>(ARef<drm::Device<T>>);
 
 impl<T: Driver> Registration<T> {
+    /// Creates a new [`Registration`] and registers it.
     fn new(drm: &drm::Device<T>, flags: usize) -> Result<Self> {
         // SAFETY: `drm.as_raw()` is valid by the invariants of `drm::Device`.
         to_result(unsafe { bindings::drm_dev_register(drm.as_raw(), flags) })?;
@@ -128,9 +129,8 @@ impl<T: Driver> Registration<T> {
         Ok(Self(drm.into()))
     }
 
-    /// Registers a new [`Device`](drm::Device) with userspace.
-    ///
-    /// Ownership of the [`Registration`] object is passed to [`devres::register`].
+    /// Same as [`Registration::new`}, but transfers ownership of the [`Registration`] to
+    /// [`devres::register`].
     pub fn new_foreign_owned(
         drm: &drm::Device<T>,
         dev: &device::Device<device::Bound>,

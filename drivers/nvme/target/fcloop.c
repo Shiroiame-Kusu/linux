@@ -491,7 +491,6 @@ fcloop_t2h_xmt_ls_rsp(struct nvme_fc_local_port *localport,
 	struct fcloop_rport *rport = remoteport->private;
 	struct nvmet_fc_target_port *targetport = rport->targetport;
 	struct fcloop_tport *tport;
-	int ret = 0;
 
 	if (!targetport) {
 		/*
@@ -501,18 +500,12 @@ fcloop_t2h_xmt_ls_rsp(struct nvme_fc_local_port *localport,
 		 * We end up here from delete association exchange:
 		 * nvmet_fc_xmt_disconnect_assoc sends an async request.
 		 *
-		 * Return success when remoteport is still online because this
-		 * is what LLDDs do and silently drop the response.  Otherwise,
-		 * return with error to signal upper layer to perform the lsrsp
-		 * resource cleanup.
+		 * Return success because this is what LLDDs do; silently
+		 * drop the response.
 		 */
-		if (remoteport->port_state == FC_OBJSTATE_ONLINE)
-			lsrsp->done(lsrsp);
-		else
-			ret = -ENODEV;
-
+		lsrsp->done(lsrsp);
 		kmem_cache_free(lsreq_cache, tls_req);
-		return ret;
+		return 0;
 	}
 
 	memcpy(lsreq->rspaddr, lsrsp->rspbuf,

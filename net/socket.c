@@ -674,7 +674,7 @@ static void __sock_release(struct socket *sock, struct inode *inode)
 		iput(SOCK_INODE(sock));
 		return;
 	}
-	WRITE_ONCE(sock->file, NULL);
+	sock->file = NULL;
 }
 
 /**

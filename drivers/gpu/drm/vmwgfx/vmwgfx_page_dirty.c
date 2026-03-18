@@ -260,13 +260,6 @@ out_no_dirty:
 	return ret;
 }
 
-static void vmw_bo_dirty_free(struct kref *kref)
-{
-	struct vmw_bo_dirty *dirty = container_of(kref, struct vmw_bo_dirty, ref_count);
-
-	kvfree(dirty);
-}
-
 /**
  * vmw_bo_dirty_release - Release a dirty-tracking user from a buffer object
  * @vbo: The buffer object
@@ -281,7 +274,7 @@ void vmw_bo_dirty_release(struct vmw_bo *vbo)
 {
 	struct vmw_bo_dirty *dirty = vbo->dirty;
 
-	if (dirty && kref_put(&dirty->ref_count, vmw_bo_dirty_free))
+	if (dirty && kref_put(&dirty->ref_count, (void *)kvfree))
 		vbo->dirty = NULL;
 }
 

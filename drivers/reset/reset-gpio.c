@@ -111,7 +111,6 @@ static struct auxiliary_driver reset_gpio_driver = {
 	.id_table	= reset_gpio_ids,
 	.driver	= {
 		.name = "reset-gpio",
-		.suppress_bind_attrs = true,
 	},
 };
 module_auxiliary_driver(reset_gpio_driver);

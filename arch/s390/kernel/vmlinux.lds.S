@@ -221,7 +221,6 @@ SECTIONS
 	/* Debugging sections.	*/
 	STABS_DEBUG
 	DWARF_DEBUG
-	MODINFO
 	ELF_DETAILS
 
 	/*

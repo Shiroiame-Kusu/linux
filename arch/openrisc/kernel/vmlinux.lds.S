@@ -101,7 +101,6 @@ SECTIONS
 	/* Throw in the debugging sections */
 	STABS_DEBUG
 	DWARF_DEBUG
-	MODINFO
 	ELF_DETAILS
 
         /* Sections to be discarded -- must be last */

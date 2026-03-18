@@ -16,9 +16,10 @@
 
 static int udplitev6_sk_init(struct sock *sk)
 {
+	udpv6_init_sock(sk);
 	pr_warn_once("UDP-Lite is deprecated and scheduled to be removed in 2025, "
 		     "please contact the netdev mailing list\n");
-	return udpv6_init_sock(sk);
+	return 0;
 }
 
 static int udplitev6_rcv(struct sk_buff *skb)

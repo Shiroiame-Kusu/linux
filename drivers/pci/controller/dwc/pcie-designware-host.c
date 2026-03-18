@@ -665,8 +665,14 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 			goto err_remove_edma;
 	}
 
-	/* Ignore errors, the link may come up later */
-	dw_pcie_wait_for_link(pci);
+	/*
+	 * Note: Skip the link up delay only when a Link Up IRQ is present.
+	 * If there is no Link Up IRQ, we should not bypass the delay
+	 * because that would require users to manually rescan for devices.
+	 */
+	if (!pp->use_linkup_irq)
+		/* Ignore errors, the link may come up later */
+		dw_pcie_wait_for_link(pci);
 
 	ret = pci_host_probe(bridge);
 	if (ret)
@@ -946,14 +952,7 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 		dev_warn(pci->dev, "Ranges exceed outbound iATU size (%d)\n",
 			 pci->num_ob_windows);
 
-	if (pp->use_atu_msg) {
-		if (pci->num_ob_windows > ++i) {
-			pp->msg_atu_index = i;
-		} else {
-			dev_err(pci->dev, "Cannot add outbound window for MSG TLP\n");
-			return -ENOMEM;
-		}
-	}
+	pp->msg_atu_index = i;
 
 	i = 0;
 	resource_list_for_each_entry(entry, &pp->bridge->dma_ranges) {
@@ -1159,11 +1158,8 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
 int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 {
 	u8 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
-	int ret = 0;
 	u32 val;
-
-	if (!dw_pcie_link_up(pci))
-		goto stop_link;
+	int ret;
 
 	/*
 	 * If L1SS is supported, then do not put the link into L2 as some
@@ -1178,16 +1174,6 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 		ret = dw_pcie_pme_turn_off(pci);
 		if (ret)
 			return ret;
-	}
-
-	/*
-	 * Some SoCs do not support reading the LTSSM register after
-	 * PME_Turn_Off broadcast. For those SoCs, skip waiting for L2/L3 Ready
-	 * state and wait 10ms as recommended in PCIe spec r6.0, sec 5.3.3.2.1.
-	 */
-	if (pci->pp.skip_l23_ready) {
-		mdelay(PCIE_PME_TO_L2_TIMEOUT_US/1000);
-		goto stop_link;
 	}
 
 	ret = read_poll_timeout(dw_pcie_get_ltssm, val,
@@ -1208,7 +1194,6 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 	 */
 	udelay(1);
 
-stop_link:
 	dw_pcie_stop_link(pci);
 	if (pci->pp.ops->deinit)
 		pci->pp.ops->deinit(&pci->pp);

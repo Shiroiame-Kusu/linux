@@ -278,6 +278,8 @@ struct nft_userdata {
 	unsigned char		data[];
 };
 
+#define NFT_SET_ELEM_INTERNAL_LAST	0x1
+
 /* placeholder structure for opaque set element backend representation. */
 struct nft_elem_priv { };
 
@@ -287,6 +289,7 @@ struct nft_elem_priv { };
  *	@key: element key
  *	@key_end: closing element key
  *	@data: element data
+ * 	@flags: flags
  *	@priv: element private data and extensions
  */
 struct nft_set_elem {
@@ -302,6 +305,7 @@ struct nft_set_elem {
 		u32		buf[NFT_DATA_VALUE_MAXLEN / sizeof(u32)];
 		struct nft_data val;
 	} data;
+	u32			flags;
 	struct nft_elem_priv	*priv;
 };
 
@@ -317,13 +321,11 @@ static inline void *nft_elem_priv_cast(const struct nft_elem_priv *priv)
  * @NFT_ITER_UNSPEC: unspecified, to catch errors
  * @NFT_ITER_READ: read-only iteration over set elements
  * @NFT_ITER_UPDATE: iteration under mutex to update set element state
- * @NFT_ITER_UPDATE_CLONE: clone set before iteration under mutex to update element
  */
 enum nft_iter_type {
 	NFT_ITER_UNSPEC,
 	NFT_ITER_READ,
 	NFT_ITER_UPDATE,
-	NFT_ITER_UPDATE_CLONE,
 };
 
 struct nft_set;
@@ -1859,11 +1861,6 @@ struct nft_trans_gc {
 	struct nft_elem_priv	*priv[NFT_TRANS_GC_BATCHCOUNT];
 	struct rcu_head		rcu;
 };
-
-static inline int nft_trans_gc_space(const struct nft_trans_gc *trans)
-{
-	return NFT_TRANS_GC_BATCHCOUNT - trans->count;
-}
 
 static inline void nft_ctx_update(struct nft_ctx *ctx,
 				  const struct nft_trans *trans)

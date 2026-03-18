@@ -221,7 +221,7 @@ static int mnt_alloc_id(struct mount *mnt)
 	int res;
 
 	xa_lock(&mnt_id_xa);
-	res = __xa_alloc(&mnt_id_xa, &mnt->mnt_id, mnt, xa_limit_31b, GFP_KERNEL);
+	res = __xa_alloc(&mnt_id_xa, &mnt->mnt_id, mnt, XA_LIMIT(1, INT_MAX), GFP_KERNEL);
 	if (!res)
 		mnt->mnt_id_unique = ++mnt_id_ctr;
 	xa_unlock(&mnt_id_xa);
@@ -1537,33 +1537,23 @@ static struct mount *mnt_find_id_at_reverse(struct mnt_namespace *ns, u64 mnt_id
 static void *m_start(struct seq_file *m, loff_t *pos)
 {
 	struct proc_mounts *p = m->private;
-	struct mount *mnt;
 
 	down_read(&namespace_sem);
 
-	mnt = mnt_find_id_at(p->ns, *pos);
-	if (mnt)
-		*pos = mnt->mnt_id_unique;
-	return mnt;
+	return mnt_find_id_at(p->ns, *pos);
 }
 
 static void *m_next(struct seq_file *m, void *v, loff_t *pos)
 {
-	struct mount *mnt = v;
+	struct mount *next = NULL, *mnt = v;
 	struct rb_node *node = rb_next(&mnt->mnt_node);
 
+	++*pos;
 	if (node) {
-		struct mount *next = node_to_mount(node);
+		next = node_to_mount(node);
 		*pos = next->mnt_id_unique;
-		return next;
 	}
-
-	/*
-	 * No more mounts. Set pos past current mount's ID so that if
-	 * iteration restarts, mnt_find_id_at() returns NULL.
-	 */
-	*pos = mnt->mnt_id_unique + 1;
-	return NULL;
+	return next;
 }
 
 static void m_stop(struct seq_file *m, void *v)
@@ -5792,7 +5782,7 @@ SYSCALL_DEFINE4(statmount, const struct mnt_id_req __user *, req,
 
 	if (kreq.mnt_ns_id && (ns != current->nsproxy->mnt_ns) &&
 	    !ns_capable_noaudit(ns->user_ns, CAP_SYS_ADMIN))
-		return -EPERM;
+		return -ENOENT;
 
 	ks = kmalloc(sizeof(*ks), GFP_KERNEL_ACCOUNT);
 	if (!ks)

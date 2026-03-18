@@ -41,8 +41,7 @@
 #define UVC_EXT_GPIO_UNIT		0x7ffe
 #define UVC_EXT_GPIO_UNIT_ID		0x100
 
-#define UVC_HARDWARE_ENTITY_ID(id)	((id) & 0xff)
-#define UVC_INVALID_ENTITY_ID		0xffff
+#define UVC_INVALID_ENTITY_ID          0xffff
 
 /* ------------------------------------------------------------------------
  * Driver specific constants.
@@ -787,7 +786,7 @@ int uvc_ctrl_get(struct uvc_video_chain *chain, u32 which,
 		 struct v4l2_ext_control *xctrl);
 int uvc_ctrl_set(struct uvc_fh *handle, struct v4l2_ext_control *xctrl);
 int uvc_ctrl_is_accessible(struct uvc_video_chain *chain, u32 v4l2_id,
-			   const struct v4l2_ext_controls *ctrls, u32 which,
+			   const struct v4l2_ext_controls *ctrls,
 			   unsigned long ioctl);
 
 int uvc_xu_ctrl_query(struct uvc_video_chain *chain,

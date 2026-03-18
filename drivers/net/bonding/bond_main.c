@@ -324,7 +324,7 @@ static bool bond_sk_check(struct bonding *bond)
 	}
 }
 
-bool __bond_xdp_check(int mode, int xmit_policy)
+bool bond_xdp_check(struct bonding *bond, int mode)
 {
 	switch (mode) {
 	case BOND_MODE_ROUNDROBIN:
@@ -335,17 +335,12 @@ bool __bond_xdp_check(int mode, int xmit_policy)
 		/* vlan+srcmac is not supported with XDP as in most cases the 802.1q
 		 * payload is not in the packet due to hardware offload.
 		 */
-		if (xmit_policy != BOND_XMIT_POLICY_VLAN_SRCMAC)
+		if (bond->params.xmit_policy != BOND_XMIT_POLICY_VLAN_SRCMAC)
 			return true;
 		fallthrough;
 	default:
 		return false;
 	}
-}
-
-bool bond_xdp_check(struct bonding *bond, int mode)
-{
-	return __bond_xdp_check(mode, bond->params.xmit_policy);
 }
 
 /*---------------------------------- VLAN -----------------------------------*/
