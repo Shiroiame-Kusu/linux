@@ -3686,14 +3686,6 @@ static u16 mellanox_broken_intx_devs[] = {
 #define CONNECTX_4_INTX_SUPPORT_MINOR 14
 
 /*
- * After asserting Secondary Bus Reset to downstream devices via a GB10
- * Root Port, the link may not retrain correctly.
- * https://lore.kernel.org/r/20251113084441.2124737-1-Johnny-CC.Chang@mediatek.com
- */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22CE, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22D0, quirk_no_bus_reset);
-
-/*
  * Check ConnectX-4/LX FW version to see if it supports legacy interrupts.
  * If so, don't mark it as broken.
  * FW minor > 99 means older FW version format and no INTx masking support.
@@ -3866,6 +3858,14 @@ static int pcie_acs_overrides(struct pci_dev *dev, u16 acs_flags)
 
 	return -ENOTTY;
 }
+/*
+ * After asserting Secondary Bus Reset to downstream devices via a GB10
+ * Root Port, the link may not retrain correctly.
+ * https://lore.kernel.org/r/20251113084441.2124737-1-Johnny-CC.Chang@mediatek.com
+ */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22CE, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22D0, quirk_no_bus_reset);
+
 /*
  * Some NVIDIA GPU devices do not work with bus reset, SBR needs to be
  * prevented for those affected devices.

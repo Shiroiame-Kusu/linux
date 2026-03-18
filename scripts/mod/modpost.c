@@ -1782,9 +1782,9 @@ static void check_exports(struct module *mod)
 			add_namespace(&mod->missing_namespaces, exp->namespace);
 		}
 
-		// if (!mod->is_gpl_compatible && exp->is_gpl_only)
-		// 	error("GPL-incompatible module %s.ko uses GPL-only symbol '%s'\n",
-		// 	      basename, exp->name);
+		if (!mod->is_gpl_compatible && exp->is_gpl_only)
+			error("GPL-incompatible module %s.ko uses GPL-only symbol '%s'\n",
+			      basename, exp->name);
 	}
 }
 
