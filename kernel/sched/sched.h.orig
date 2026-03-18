@@ -5,10 +5,6 @@
 #ifndef _KERNEL_SCHED_SCHED_H
 #define _KERNEL_SCHED_SCHED_H
 
-#ifdef CONFIG_SCHED_ALT
-#include "alt_sched.h"
-#else
-
 #include <linux/sched/affinity.h>
 #include <linux/sched/autogroup.h>
 #include <linux/sched/cpufreq.h>
@@ -681,8 +677,8 @@ struct cfs_rq {
 	unsigned int		h_nr_runnable;     /* SCHED_{NORMAL,BATCH,IDLE} */
 	unsigned int		h_nr_idle; /* SCHED_IDLE */
 
-	s64			sum_w_vruntime;
-	u64			sum_weight;
+	s64			avg_vruntime;
+	u64			avg_load;
 
 	u64			zero_vruntime;
 #ifdef CONFIG_SCHED_CORE
@@ -2169,11 +2165,7 @@ extern int group_balance_cpu(struct sched_group *sg);
 extern void update_sched_domain_debugfs(void);
 extern void dirty_sched_domain_sysctl(int cpu);
 
-#ifdef CONFIG_SCHED_BORE
-extern void sched_update_min_base_slice(void);
-#else /* !CONFIG_SCHED_BORE */
 extern int sched_update_scaling(void);
-#endif /* CONFIG_SCHED_BORE */
 
 static inline const struct cpumask *task_user_cpus(struct task_struct *p)
 {
@@ -2979,12 +2971,7 @@ extern void wakeup_preempt(struct rq *rq, struct task_struct *p, int flags);
 extern __read_mostly unsigned int sysctl_sched_nr_migrate;
 extern __read_mostly unsigned int sysctl_sched_migration_cost;
 
-#ifdef CONFIG_SCHED_BORE
-extern unsigned int sysctl_sched_min_base_slice;
-extern __read_mostly uint sysctl_sched_base_slice;
-#else /* !CONFIG_SCHED_BORE */
 extern unsigned int sysctl_sched_base_slice;
-#endif /* CONFIG_SCHED_BORE */
 
 extern int sysctl_resched_latency_warn_ms;
 extern int sysctl_resched_latency_warn_once;
@@ -4048,9 +4035,4 @@ DEFINE_CLASS_IS_UNCONDITIONAL(sched_change)
 
 #include "ext.h"
 
-static inline int task_running_nice(struct task_struct *p)
-{
-	return (task_nice(p) > 0);
-}
-#endif /* !CONFIG_SCHED_ALT */
 #endif /* _KERNEL_SCHED_SCHED_H */
