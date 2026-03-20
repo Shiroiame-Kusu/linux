@@ -63,9 +63,14 @@ prepare() {
 
 build() {
     cd "$srcdir/../"
+    local build_jobs=$(( $(nproc) - 2 ))
+
+    if (( build_jobs < 1 )); then
+        build_jobs=1
+    fi
     
     echo "Building kernel..."
-    make "${BUILD_FLAGS[@]}" -j"$(nproc)" all
+    make "${BUILD_FLAGS[@]}" -j"${build_jobs}" all
 
     echo "Building bpftool vmlinux.h..."
     make -C tools/bpf/bpftool vmlinux.h feature-clang-bpf-co-re=1
