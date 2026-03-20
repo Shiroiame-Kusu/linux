@@ -1,6 +1,6 @@
 #
 # Automatically generated file; DO NOT EDIT.
-# Linux/x86 6.19.8 Kernel Configuration
+# Linux/x86 6.19.9 Kernel Configuration
 #
 CONFIG_CC_VERSION_TEXT="clang version 22.1.1"
 CONFIG_GCC_VERSION=0
@@ -11217,7 +11217,6 @@ CONFIG_FS_IOMAP=y
 CONFIG_FS_STACK=y
 CONFIG_BUFFER_HEAD=y
 CONFIG_LEGACY_DIRECT_IO=y
-CONFIG_ZFS=m
 # CONFIG_EXT2_FS is not set
 CONFIG_EXT4_FS=y
 CONFIG_EXT4_USE_FOR_EXT2=y
