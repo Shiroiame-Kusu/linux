@@ -1686,6 +1686,13 @@ static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 {
 	int cpu = p->wake_cpu = cpu_of(rq);
 
+	/*
+	 * pq_node is reused for preempt_list. Clear __sched_prio before linking
+	 * here so queued-but-preempted tasks cannot be mistaken for srq/grq
+	 * members by __task_modify_lock().
+	 */
+	WARN_ON_ONCE(p->__sched_prio != -1);
+	WRITE_ONCE(p->__sched_prio, -1);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
 	resched_curr(rq);
@@ -2733,6 +2740,8 @@ static inline void __sched_fork(u64 clone_flags, struct task_struct *p)
 	p->utime			= 0;
 	p->stime			= 0;
 	p->sched_time			= 0;
+	p->pq_node.next			= NULL;
+	p->__sched_prio			= -1;
 
 #ifdef CONFIG_SCHEDSTATS
 	/* Even if schedstat is disabled, there should not be garbage */
@@ -4133,6 +4142,7 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 		}
 	}
 	if (NULL != preempt) {
+		WARN_ON_ONCE(preempt->__sched_prio != -1);
 		WRITE_ONCE(preempt->on_rq, TASK_ON_RQ_QUEUED);
 		ASSERT_EXCLUSIVE_WRITER(preempt->on_rq);
 
