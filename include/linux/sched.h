@@ -874,7 +874,12 @@ struct task_struct {
 #ifdef CONFIG_SCHED_ALT
 	u64				last_ran;
 	s64				time_slice;
+	/*
+	 * Reused intrusive queue node. A task may be linked on either
+	 * srq/grq or preempt_list, but never both at the same time.
+	 */
 	struct llist_node		pq_node;
+	/* Membership marker for srq/grq only, not for preempt_list. */
 	int				__sched_prio;
 #ifdef CONFIG_SCHED_BMQ
 	int				boost_prio;
