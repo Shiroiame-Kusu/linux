@@ -154,8 +154,14 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 	struct llist_node *last, *first = llist_del_all(head);				\
 											\
 	last = sched_llist_del(&first, &p->pq_node);					\
-	if (first) {									\
-		sched_llist_merge(head, first, last);					\
+	if (first && last) {							\
+		sched_llist_merge(head, first, last);				\
+	} else if (first) {							\
+		/* last == NULL: target not found, put list back */		\
+		struct llist_node *tail = first;					\
+		while (tail->next)						\
+			tail = tail->next;					\
+		sched_llist_merge(head, first, tail);				\
 	} else if (llist_empty(head)) {							\
 		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
 		clear_bit(idx, srq->bitmap);						\
