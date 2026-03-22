@@ -92,6 +92,9 @@ struct sched_domain {
 	unsigned int nr_balance_failed; /* initialise to 0 */
 
 	/* idle_balance() stats */
+	unsigned int newidle_call;
+	unsigned int newidle_success;
+	unsigned int newidle_ratio;
 	u64 max_newidle_lb_cost;
 	unsigned long last_decay_max_lb_cost;
 
@@ -187,7 +190,8 @@ extern void sched_update_asym_prefer_cpu(int cpu, int old_prio, int new_prio);
 #define SDTL_INIT(maskfn, flagsfn, dname) ((struct sched_domain_topology_level) \
 	    { .mask = maskfn, .sd_flags = flagsfn, .name = #dname })
 
-#if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL)
+#if defined(CONFIG_ENERGY_MODEL) && defined(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) && \
+	!defined(CONFIG_SCHED_ALT)
 extern void rebuild_sched_domains_energy(void);
 #else
 static inline void rebuild_sched_domains_energy(void)
