@@ -3087,6 +3087,10 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 	 * happen before this.
 	 *
 	 * Pairs with the smp_cond_load_acquire() in try_to_wake_up().
+	 *
+	 * Note: accessing prev fields after on_cpu release is safe here
+	 * because rq->lock is held (released later in finish_lock_switch),
+	 * which serializes against ttwu_runnable() and __set_cpus_allowed_ptr.
 	 */
 	smp_store_release(&prev->on_cpu, 0);
 
