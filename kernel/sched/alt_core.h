@@ -149,7 +149,7 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 
 #define SRQ_DEQUEUE_TASK(srq, p, __modify_body__)					\
 {											\
-	int idx = p->__sched_prio;							\
+	int idx = READ_ONCE(p->__sched_prio);						\
 	struct llist_head *head = &srq->_head[idx];					\
 	struct llist_node *last, *first = llist_del_all(head);				\
 											\
@@ -164,7 +164,7 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 			set_bit(idx, srq->bitmap);					\
 	}										\
 	__modify_body__									\
-	p->__sched_prio = -1;								\
+	WRITE_ONCE(p->__sched_prio, -1);						\
 	atomic_dec(&srq->nr_queued);							\
 }
 
@@ -172,7 +172,7 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 {								\
 	int sched_prio = task_sched_prio(p);			\
 								\
-	p->__sched_prio = sched_prio;				\
+	WRITE_ONCE(p->__sched_prio, sched_prio);		\
 	__modify_body__						\
 	if (llist_add(&p->pq_node, &(srq)->_head[sched_prio]))	\
 		set_bit(sched_prio, (srq)->bitmap);		\
@@ -207,12 +207,13 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
-			} else if ((idx = p->__sched_prio) != -1) {
+			} else if ((idx = READ_ONCE(p->__sched_prio)) != -1) {
 				struct sched_run_queue *srq = cpu_srq(0);
 				raw_spinlock_t *lock = &srq->_lock[idx];
 
 				raw_spin_lock(lock);
-				if (task_on_rq_queued(p) && !p->on_cpu && idx == p->__sched_prio) {
+				if (task_on_rq_queued(p) && !p->on_cpu &&
+				    idx == READ_ONCE(p->__sched_prio)) {
 
 					SRQ_DEQUEUE_TASK(srq, p, {
 							 WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
