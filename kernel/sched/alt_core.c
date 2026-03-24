@@ -4200,7 +4200,7 @@ static __always_inline void wakeup_srq_task(const int cpu)
 		if (next) {									\
 			if (task_cpu(next) != cpu)						\
 				set_task_cpu(next, cpu);					\
-			next->__sched_prio = -1;						\
+			WRITE_ONCE(next->__sched_prio, -1);					\
 			atomic_dec(&srq->nr_queued);						\
 			raw_spin_unlock(lock);							\
 			goto picked;								\
