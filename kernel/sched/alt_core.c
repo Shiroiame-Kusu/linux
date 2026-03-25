@@ -1693,6 +1693,8 @@ static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 	 */
 	WARN_ON_ONCE(p->__sched_prio != -1);
 	WRITE_ONCE(p->__sched_prio, -1);
+	if (task_cpu(p) != cpu)
+		set_task_cpu(p, cpu);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
 	resched_curr(rq);
