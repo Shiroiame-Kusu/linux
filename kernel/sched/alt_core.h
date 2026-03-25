@@ -148,20 +148,23 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 }
 
 #define SRQ_DEQUEUE_TASK(srq, p, __modify_body__)					\
-{											\
+({											\
+	bool __found = true;								\
 	int idx = READ_ONCE(p->__sched_prio);						\
 	struct llist_head *head = &srq->_head[idx];					\
 	struct llist_node *last, *first = llist_del_all(head);				\
 											\
 	last = sched_llist_del(&first, &p->pq_node);					\
-	if (first && last) {							\
-		sched_llist_merge(head, first, last);				\
-	} else if (first) {							\
-		/* last == NULL: target not found, put list back */		\
-		struct llist_node *tail = first;					\
-		while (tail->next)						\
-			tail = tail->next;					\
-		sched_llist_merge(head, first, tail);				\
+	if (unlikely(!last)) {								\
+		if (first) {								\
+			struct llist_node *tail = first;					\
+			while (tail->next)						\
+				tail = tail->next;					\
+			sched_llist_merge(head, first, tail);				\
+		}									\
+		__found = false;							\
+	} else if (first) {								\
+		sched_llist_merge(head, first, last);					\
 	} else if (llist_empty(head)) {							\
 		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
 		clear_bit(idx, srq->bitmap);						\
@@ -169,10 +172,13 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 		if (!llist_empty(head))							\
 			set_bit(idx, srq->bitmap);					\
 	}										\
-	__modify_body__									\
-	WRITE_ONCE(p->__sched_prio, -1);						\
-	atomic_dec(&srq->nr_queued);							\
-}
+	if (__found) {									\
+		__modify_body__								\
+		WRITE_ONCE(p->__sched_prio, -1);					\
+		atomic_dec(&srq->nr_queued);						\
+	}										\
+	__found;									\
+})
 
 #define SRQ_ENQUEUE_TASK(srq, p, __modify_body__)		\
 {								\
@@ -221,9 +227,12 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				if (task_on_rq_queued(p) && !p->on_cpu &&
 				    idx == READ_ONCE(p->__sched_prio)) {
 
-					SRQ_DEQUEUE_TASK(srq, p, {
-							 WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
-							 });
+					if (!SRQ_DEQUEUE_TASK(srq, p, {
+							WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+						})) {
+						raw_spin_unlock(lock);
+						continue;
+					}
 
 					raw_spin_unlock(lock);
 
@@ -232,6 +241,25 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 					return task_rq(p);
 				}
 				raw_spin_unlock(lock);
+			} else {
+				int wake_cpu = READ_ONCE(p->wake_cpu);
+				struct rq *rq = cpu_rq(wake_cpu);
+
+				/*
+				 * queued + __sched_prio == -1 means the task is owned by
+				 * preempt_list or has just been picked from it. Serialize
+				 * those transient states with the wakeup rq lock instead of
+				 * spinning forever as if the task was in srq/grq.
+				 */
+				raw_spin_lock(&rq->lock);
+				if (task_on_rq_queued(p) && !p->on_cpu &&
+				    READ_ONCE(p->__sched_prio) == -1 &&
+				    wake_cpu == READ_ONCE(p->wake_cpu)) {
+					rf->lock = &rq->lock;
+					rf->queued = false;
+					return rq;
+				}
+				raw_spin_unlock(&rq->lock);
 			}
 		} else if (task_on_rq_migrating(p)) {
 			do {
