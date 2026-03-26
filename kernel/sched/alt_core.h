@@ -147,6 +147,11 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 	}
 }
 
+/*
+ * p->__sched_prio is SRQ/GRQ membership metadata for pq_node reuse.
+ * -1 means the task is not linked in SRQ/GRQ (running, blocked, or owned by
+ * preempt_list); non-negative values identify the SRQ/GRQ bucket.
+ */
 #define SRQ_DEQUEUE_TASK(srq, p, __modify_body__)					\
 ({											\
 	bool __found = true;								\
