@@ -150,7 +150,8 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 /*
  * p->__sched_prio is SRQ/GRQ membership metadata for pq_node reuse.
  * -1 means the task is not linked in SRQ/GRQ (running, blocked, or owned by
- * preempt_list); non-negative values identify the SRQ/GRQ bucket.
+ * preempt_list, or freshly picked by the scheduler); non-negative values
+ * identify the SRQ/GRQ bucket.
  */
 #define SRQ_DEQUEUE_TASK(srq, p, __modify_body__)					\
 ({											\
@@ -212,13 +213,28 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
+		} else if (task_on_rq_preempt(p)) {
+			int wake_cpu = READ_ONCE(p->wake_cpu);
+			struct rq *rq = cpu_rq(wake_cpu);
+
+			raw_spin_lock(&rq->lock);
+			if (likely(task_on_rq_preempt(p) &&
+				   wake_cpu == READ_ONCE(p->wake_cpu) &&
+				   rq == task_rq(p))) {
+				rf->lock = &rq->lock;
+				rf->queued = false;
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
 		} else if (task_on_rq_queued(p)) {
 			int idx;
+
 			if (p->on_cpu) {
 				struct rq *rq = task_rq(p);
 
 				raw_spin_lock(&rq->lock);
-				if (likely(task_on_rq_queued(p) && p->on_cpu && rq == task_rq(p))) {
+				if (likely(task_on_rq_queued(p) && p->on_cpu &&
+					   rq == task_rq(p))) {
 					rf->lock = &rq->lock;
 					rf->queued = false;
 					return rq;
@@ -247,19 +263,18 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				}
 				raw_spin_unlock(lock);
 			} else {
-				int wake_cpu = READ_ONCE(p->wake_cpu);
-				struct rq *rq = cpu_rq(wake_cpu);
+				struct rq *rq = task_rq(p);
 
 				/*
-				 * queued + __sched_prio == -1 means the task is owned by
-				 * preempt_list or has just been picked from it. Serialize
-				 * those transient states with the wakeup rq lock instead of
-				 * spinning forever as if the task was in srq/grq.
+				 * queued + __sched_prio == -1 means the task has already
+				 * been detached from SRQ/GRQ and selected by the scheduler.
+				 * Serialize this picked-but-not-running window on task_rq().
 				 */
 				raw_spin_lock(&rq->lock);
 				if (task_on_rq_queued(p) && !p->on_cpu &&
 				    READ_ONCE(p->__sched_prio) == -1 &&
-				    wake_cpu == READ_ONCE(p->wake_cpu)) {
+				    rq == task_rq(p)) {
+					WARN_ON_ONCE(rq->curr != p);
 					rf->lock = &rq->lock;
 					rf->queued = false;
 					return rq;

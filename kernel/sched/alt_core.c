@@ -235,15 +235,15 @@ EXPORT_SYMBOL(__trace_set_current_state);
  *   concurrent self.
  *
  * p->on_rq <- { 0, 1 = TASK_ON_RQ_QUEUED, 2 = TASK_ON_RQ_MIGRATING,
- *	       11 = TASK_ON_RQ_WAKING }:
+ *	       11 = TASK_ON_RQ_WAKING, 12 = TASK_ON_RQ_PREEMPT }:
  *
  *   is set by activate_task() and cleared by deactivate_task()/block_task(),
  *   under rq->lock. Non-zero indicates the task is runnable, the special
  *   ON_RQ_MIGRATING state is used for migration without holding both
  *   rq->locks. It indicates task_cpu() is not stable, see task_rq_lock().
- *   TASK_ON_RQ_WAKING is a transient wakeup/preemption state owned by
- *   cpu_rq(p->wake_cpu); the task may be sitting in preempt_list before it
- *   becomes TASK_ON_RQ_QUEUED again.
+ *   TASK_ON_RQ_WAKING remains reserved for generic wakeup handoff. LFBMQ
+ *   uses TASK_ON_RQ_PREEMPT for explicit preempt_list ownership, serialized
+ *   by cpu_rq(p->wake_cpu) until the task becomes TASK_ON_RQ_QUEUED again.
  *
  *   Additionally it is possible to be ->on_rq but still be considered not
  *   runnable when p->se.sched_delayed is true. These tasks are on the runqueue
@@ -309,6 +309,19 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 
 			raw_spin_lock(&rq->lock);
 			if (likely(TASK_ON_RQ_WAKING == p->on_rq && rq == task_rq(p))) {
+				rf->lock = &rq->lock;
+				rf->queued = false;
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
+		} else if (task_on_rq_preempt(p)) {
+			int wake_cpu = READ_ONCE(p->wake_cpu);
+			struct rq *rq = cpu_rq(wake_cpu);
+
+			raw_spin_lock(&rq->lock);
+			if (likely(task_on_rq_preempt(p) &&
+				   wake_cpu == READ_ONCE(p->wake_cpu) &&
+				   rq == task_rq(p))) {
 				rf->lock = &rq->lock;
 				rf->queued = false;
 				return rq;
@@ -586,7 +599,7 @@ static inline void sched_update_tick_dependency(struct rq *rq) { }
 
 bool sched_task_on_rq(struct task_struct *p)
 {
-	return task_on_rq_queued(p);
+	return task_on_rq_queued(p) || task_on_rq_preempt(p);
 }
 
 unsigned long get_wchan(struct task_struct *p)
@@ -1061,22 +1074,22 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 		 * lock now, to be *sure*. If we're wrong, we'll
 		 * just go back and repeat.
 		 */
-		raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
-		__task_rq_lock(p, &rf);
-		trace_sched_wait_task(p);
-		running = task_on_cpu(p);
-		queued = task_on_rq_queued(p);
-		ncsw = 0;
-		if ((match = __task_state_match(p, match_state))) {
-			/*
-			 * When matching on p->saved_state, consider this task
-			 * still queued so it will wait.
-			 */
-			if (match < 0)
-				queued = 1;
-			ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
-		}
-		__task_rq_unlock(&rf);
+			raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
+			__task_rq_lock(p, &rf);
+			trace_sched_wait_task(p);
+			running = task_on_cpu(p);
+			queued = sched_task_on_rq(p);
+			ncsw = 0;
+			if ((match = __task_state_match(p, match_state))) {
+				/*
+				 * When matching on p->saved_state, consider this task
+				 * still queued so it will wait.
+				 */
+				if (match < 0)
+					queued = 1;
+				ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
+			}
+			__task_rq_unlock(&rf);
 		raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
 
 		/*
@@ -1324,9 +1337,13 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	unsigned int state = READ_ONCE(p->__state);
 
 	/*
-	 * We should only call set_task_cpu() on a running task in pick_next_task().
+	 * LFBMQ may also call set_task_cpu() while a runnable task is transiently
+	 * detached for queued-task modify/requeue. Blocked or otherwise detached
+	 * tasks must still be rejected here.
 	 */
 	WARN_ON_ONCE(state != TASK_RUNNING && !task_on_rq_queued(p) &&
+		     !task_on_rq_migrating(p) &&
+		     !task_on_rq_preempt(p) &&
 		     TASK_ON_RQ_WAKING != p->on_rq);
 
 	/*
@@ -1703,17 +1720,27 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p)
 
 static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 {
-	int cpu = p->wake_cpu = cpu_of(rq);
+	int cpu = cpu_of(rq);
 
 	/*
-	 * pq_node is reused for preempt_list. Clear SRQ/GRQ ownership before
-	 * linking here and keep task_cpu() aligned with wake_cpu so
-	 * TASK_ON_RQ_WAKING remains serialized by cpu_rq(p->wake_cpu).
+	 * pq_node is reused for preempt_list. TASK_ON_RQ_PREEMPT is the sole
+	 * explicit marker that pq_node is currently owned by preempt_list.
+	 * Repeated wakeups on the same wake_cpu only need to refresh resched state.
 	 */
+	if (task_on_rq_preempt(p) && READ_ONCE(p->wake_cpu) == cpu) {
+		WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+		resched_curr(rq);
+		raw_spin_unlock(&rq->lock);
+		return;
+	}
+
+	WRITE_ONCE(p->wake_cpu, cpu);
 	WARN_ON_ONCE(p->__sched_prio != -1);
 	WRITE_ONCE(p->__sched_prio, -1);
 	if (task_cpu(p) != cpu)
 		set_task_cpu(p, cpu);
+	WRITE_ONCE(p->on_rq, TASK_ON_RQ_PREEMPT);
+	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
 	resched_curr(rq);
@@ -1723,9 +1750,6 @@ static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 
 static __always_inline void wakeup_preempt_on_rq(struct task_struct *p, struct rq *rq)
 {
-	WRITE_ONCE(p->on_rq, TASK_ON_RQ_WAKING);
-	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
-
 	WRITE_ONCE(p->__state, TASK_RUNNING);
 
 	preempt_on_rq(p, rq);
@@ -1736,9 +1760,7 @@ void wakeup_modified_task(struct task_struct *p)
 	struct rq *rq = wakeup_rq_trylock(p);
 
 	if (rq) {
-		WRITE_ONCE(p->on_rq, TASK_ON_RQ_WAKING);
-		ASSERT_EXCLUSIVE_WRITER(p->on_rq);
-
+		/* queued-task attr changes may reach here from TASK_ON_RQ_MIGRATING */
 		preempt_on_rq(p, rq);
 		return;
 	}
@@ -2116,9 +2138,19 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 	struct rq *rq;
 	int ret = 0;
 
-	rq = task_rq(p);
+	if (task_on_rq_preempt(p))
+		rq = cpu_rq(READ_ONCE(p->wake_cpu));
+	else
+		rq = task_rq(p);
+
 	raw_spin_lock(&rq->lock);
-	if (task_on_rq_queued(p)) {
+	if (task_on_rq_preempt(p)) {
+		update_rq_clock(rq);
+		if (task_sched_prio(p) < READ_ONCE(cpu_prio[cpu_of(rq)]))
+			resched_curr(rq);
+		ttwu_do_wakeup(p);
+		ret = 1;
+	} else if (task_on_rq_queued(p)) {
 		update_rq_clock(rq);
 		if (!task_on_cpu(p)) {
 			/*
@@ -4142,7 +4174,8 @@ static __always_inline void migrate_preempt_task(struct task_struct *p, const in
 		preempt_on_rq(p, rq);
 	else
 	*/
-		activate_task(p, cpu_srq(cpu));
+	WARN_ON_ONCE(!task_on_rq_preempt(p));
+	activate_task(p, cpu_srq(cpu));
 }
 
 static __always_inline struct task_struct *pick_preempt_task(const int cpu, int pick_sched_prio)
@@ -4168,6 +4201,7 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 		}
 	}
 	if (NULL != preempt) {
+		WARN_ON_ONCE(!task_on_rq_preempt(preempt));
 		WARN_ON_ONCE(preempt->__sched_prio != -1);
 		WRITE_ONCE(preempt->__sched_prio, -1);
 		WRITE_ONCE(preempt->on_rq, TASK_ON_RQ_QUEUED);
