@@ -239,17 +239,28 @@ EXPORT_SYMBOL(__trace_set_current_state);
  *   try_to_wake_up(). This latter uses p->pi_lock to serialize against
  *   concurrent self.
  *
- * p->on_rq <- { 0, 1 = TASK_ON_RQ_QUEUED, 2 = TASK_ON_RQ_MIGRATING }:
+ * p->on_rq <- { 0, 1 = TASK_ON_RQ_QUEUED, 2 = TASK_ON_RQ_MIGRATING,
+ *	       11 = TASK_ON_RQ_WAKING }:
  *
  *   is set by activate_task() and cleared by deactivate_task()/block_task(),
  *   under rq->lock. Non-zero indicates the task is runnable, the special
  *   ON_RQ_MIGRATING state is used for migration without holding both
  *   rq->locks. It indicates task_cpu() is not stable, see task_rq_lock().
+ *   TASK_ON_RQ_WAKING is a transient wakeup/preemption state owned by
+ *   cpu_rq(p->wake_cpu); the task may be sitting in preempt_list before it
+ *   becomes TASK_ON_RQ_QUEUED again.
  *
  *   Additionally it is possible to be ->on_rq but still be considered not
  *   runnable when p->se.sched_delayed is true. These tasks are on the runqueue
  *   but will be dequeued as soon as they get picked again. See the
  *   task_is_runnable() helper.
+ *
+ * p->__sched_prio <- { -1, [0, SCHED_LEVELS) }:
+ *
+ *   is SRQ/GRQ membership metadata for pq_node reuse, not a stable priority
+ *   cache. Non-negative values mean pq_node is currently linked in SRQ/GRQ at
+ *   that index. -1 means pq_node is owned elsewhere or detached, including
+ *   running, blocked, preempt_list, and freshly picked transient states.
  *
  * p->on_cpu <- { 0, 1 }:
  *
@@ -1261,6 +1272,14 @@ static void block_task(struct rq *rq, struct task_struct *p)
 	}
 
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+
+	/*
+	 * A blocked task must not keep stale SRQ/GRQ ownership. Normalize
+	 * __sched_prio before releasing p->on_rq so wakeup/preempt paths never
+	 * inherit an old queue index.
+	 */
+	WRITE_ONCE(p->__sched_prio, -1);
 
 	/*
 	 * The moment this write goes through, ttwu() can swoop in and migrate
@@ -1694,12 +1713,14 @@ static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 	int cpu = p->wake_cpu = cpu_of(rq);
 
 	/*
-	 * pq_node is reused for preempt_list. Clear __sched_prio before linking
-	 * here so queued-but-preempted tasks cannot be mistaken for srq/grq
-	 * members by __task_modify_lock().
+	 * pq_node is reused for preempt_list. Clear SRQ/GRQ ownership before
+	 * linking here and keep task_cpu() aligned with wake_cpu so
+	 * TASK_ON_RQ_WAKING remains serialized by cpu_rq(p->wake_cpu).
 	 */
 	WARN_ON_ONCE(p->__sched_prio != -1);
 	WRITE_ONCE(p->__sched_prio, -1);
+	if (task_cpu(p) != cpu)
+		set_task_cpu(p, cpu);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
 	resched_curr(rq);
@@ -3101,6 +3122,7 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 		struct rq *trq;
 		struct sched_run_queue *srq = rq_srq(rq);
 
+		WARN_ON_ONCE(READ_ONCE(prev->__sched_prio) != -1);
 		SRQ_ENQUEUE_TASK(srq, prev, );
 
 		trq = __wakeup_rq_trylock(prev, IDLE_TASK_SCHED_PRIO - 1, prev->cpus_ptr);
