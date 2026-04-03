@@ -1265,11 +1265,46 @@ static inline void activate_task(struct task_struct *p, struct sched_run_queue *
 				WRITE_ONCE(p->__state, TASK_RUNNING);
 			});
 	/*
+	 * This only publishes the task into SRQ/GRQ. Wakeup paths that fall back
+	 * here still need a follow-up CPU notification so queued tasks are
+	 * observed promptly, especially on full dynticks CPUs.
+	 *
 	 * If in_iowait is set, the code below may not trigger any cpufreq
 	 * utilization updates, so do it here explicitly with the IOWAIT flag
 	 * passed.
 	 */
 	//cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT * p->in_iowait);
+}
+
+static inline struct rq *wakeup_rq_trylock(const struct task_struct *p);
+static __always_inline void wakeup_srq_task(const int cpu);
+
+static __always_inline void notify_queued_task(struct task_struct *p)
+{
+	struct rq *rq;
+
+	lockdep_assert_held(&p->pi_lock);
+
+	/*
+	 * Only wakeup producers that just published @p into SRQ/GRQ should get
+	 * here. Requeue paths that already drove resched_curr() must not reuse
+	 * this helper.
+	 */
+	WARN_ON_ONCE(!task_on_rq_queued(p));
+	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) == -1);
+
+	rq = wakeup_rq_trylock(p);
+	if (rq) {
+		resched_curr(rq);
+		raw_spin_unlock(&rq->lock);
+		return;
+	}
+
+	/*
+	 * Best effort fallback for tasks which are already visible in the global
+	 * SRQ but were not able to grab a target rq lock above.
+	 */
+	wakeup_srq_task(0);
 }
 
 static void block_task(struct rq *rq, struct task_struct *p)
@@ -1777,6 +1812,7 @@ void wakeup_modified_task(struct task_struct *p)
 				WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 				ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 			 });
+	notify_queued_task(p);
 }
 
 void sched_set_stop_task(int cpu, struct task_struct *stop)
@@ -2111,8 +2147,10 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 		}
 
 		wakeup_preempt_on_rq(p, rq);
-	} else
+	} else {
 		activate_task(p, srq);
+		notify_queued_task(p);
+	}
 }
 
 /*
@@ -3023,8 +3061,10 @@ void wake_up_new_task(struct task_struct *p)
 
 	if (rq)
 		wakeup_preempt_on_rq(p, rq);
-	else
+	else {
 		activate_task(p, cpu_srq(0));
+		notify_queued_task(p);
+	}
 
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 }
