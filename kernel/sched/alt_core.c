@@ -1276,8 +1276,12 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p);
 
 static __always_inline bool wakeup_rq_kick(const struct task_struct *p)
 {
-	int idx, sched_prio = task_sched_prio(p);
+	const int sched_prio = task_sched_prio(p);
+	const int preempt_idx = SCHED_LEVELS - 1 - sched_prio;
+	const bool filter_test_cpu = cpumask_test_cpu(task_cpu(p), p->cpus_ptr);
 	int cpu = task_cpu(p);
+	int idx;
+	cpumask_t *end_mask = per_cpu(cpu_affinity_end_mask, cpu);
 
 	if (1 == p->nr_cpus_allowed || is_migration_disabled(p)) {
 		cpu = cpumask_any(p->cpus_ptr);
@@ -1294,11 +1298,10 @@ static __always_inline bool wakeup_rq_kick(const struct task_struct *p)
 	 * publish path can't grab a candidate rq lock immediately, fall back to a
 	 * precise CPU kick that only targets CPUs which can actually run @p.
 	 */
-	for_each_set_bit(idx, cpu_sched_prio_bitmap, SCHED_LEVELS - 1 - sched_prio) {
+	idx = preempt_idx;
+	for_each_set_bit_from(idx, cpu_sched_prio_bitmap, SCHED_LEVELS) {
 		cpumask_t *mask;
 		const struct cpumask *prio_mask = cpu_sched_prio_mask + idx;
-		cpumask_t *end_mask = per_cpu(cpu_affinity_end_mask, cpu);
-		const bool filter_test_cpu = cpumask_test_cpu(cpu, p->cpus_ptr);
 
 		if (filter_test_cpu && cpumask_test_cpu(cpu, prio_mask)) {
 			resched_cpu(cpu);
@@ -1325,6 +1328,11 @@ static __always_inline void notify_queued_task(struct task_struct *p)
 
 	lockdep_assert_held(&p->pi_lock);
 
+	/*
+	 * Publish to SRQ/GRQ first, then nudge a CPU to observe the published
+	 * state. The fallback kick only touches candidate rq state and keeps the
+	 * queue itself lock-free.
+	 */
 	rq = wakeup_rq_trylock(p);
 	if (rq) {
 		resched_curr(rq);
