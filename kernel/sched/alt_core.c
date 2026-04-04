@@ -1285,8 +1285,7 @@ static __always_inline void notify_queued_task(struct task_struct *p)
 	 * this helper.
 	 */
 	WARN_ON_ONCE(!task_on_rq_queued(p));
-	WARN_ON_ONCE(task_on_cpu(p));
-	WARN_ON_ONCE(!cpumask_intersects(p->cpus_ptr, cpu_active_mask));
+	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) == -1);
 
 	rq = wakeup_rq_trylock(p);
 	if (rq) {
@@ -1801,7 +1800,6 @@ void wakeup_modified_task(struct task_struct *p)
 		return;
 	}
 
-	WARN_ON_ONCE(!task_on_rq_migrating(p));
 	SRQ_ENQUEUE_TASK(&grq, p,
 			 {
 				WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
@@ -2143,7 +2141,6 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 
 		wakeup_preempt_on_rq(p, rq);
 	} else {
-		WARN_ON_ONCE(READ_ONCE(p->on_rq));
 		activate_task(p, srq);
 		notify_queued_task(p);
 	}
@@ -3055,7 +3052,6 @@ void wake_up_new_task(struct task_struct *p)
 	if (rq)
 		wakeup_preempt_on_rq(p, rq);
 	else {
-		WARN_ON_ONCE(READ_ONCE(p->on_rq));
 		activate_task(p, cpu_srq(0));
 		notify_queued_task(p);
 	}
