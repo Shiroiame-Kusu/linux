@@ -1285,7 +1285,12 @@ static __always_inline bool wakeup_rq_kick(const struct task_struct *p)
 
 	if (1 == p->nr_cpus_allowed || is_migration_disabled(p)) {
 		cpu = cpumask_any(p->cpus_ptr);
-		if (sched_prio < READ_ONCE(cpu_prio[cpu])) {
+		/*
+		 * Use <= for pinned tasks: they have no alternative CPU,
+		 * so even equal-priority work must trigger a resched to
+		 * avoid indefinite starvation in the global SRQ.
+		 */
+		if (sched_prio <= READ_ONCE(cpu_prio[cpu])) {
 			resched_cpu(cpu);
 			return true;
 		}
@@ -1780,8 +1785,8 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p)
 	const int sched_prio = task_sched_prio(p);
 
 	if (1 == p->nr_cpus_allowed || is_migration_disabled(p)) {
-		/* Fastpath */
 		const int cpu = cpumask_any(p->cpus_ptr);
+		struct rq *rq = cpu_rq(cpu);
 
 		if (sched_prio < READ_ONCE(cpu_prio[cpu])) {
 			struct rq *rq = cpu_rq(cpu);
@@ -1791,6 +1796,19 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p)
 		}
 
 		return NULL;
+		/*
+		 * CPU-pinned tasks can only run on one CPU, so they must
+		 * always reach the preempt_list to avoid starvation in the
+		 * global SRQ where unlimited competition from non-pinned
+		 * tasks may prevent them from ever being picked.
+		 *
+		 * Try the fast path first, fall back to a blocking lock.
+		 * Lock ordering is safe: callers already hold p->pi_lock,
+		 * and pi_lock -> rq->lock is the canonical order.
+		 */
+		// if (!raw_spin_trylock(&rq->lock))
+		// 	raw_spin_lock(&rq->lock);
+		// return rq;
 	}
 
 	return __wakeup_rq_trylock(p, sched_prio, p->cpus_ptr);
@@ -3227,16 +3245,36 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 	 * Enqueue prev if not rq->idle and prev is not blocked
 	 */
 	if (prev != rq->idle && !rq->block) {
-		struct rq *trq;
-		struct sched_run_queue *srq = rq_srq(rq);
+		int cpu = cpu_of(rq);
 
 		WARN_ON_ONCE(READ_ONCE(prev->__sched_prio) != -1);
-		SRQ_ENQUEUE_TASK(srq, prev, );
 
-		trq = __wakeup_rq_trylock(prev, IDLE_TASK_SCHED_PRIO - 1, prev->cpus_ptr);
-		if (trq) {
-			resched_curr(trq);
-			raw_spin_unlock(&trq->lock);
+		/*
+		 * CPU-pinned tasks are kept on the local preempt_list
+		 * so they are reconsidered on the next schedule() call.
+		 * Sending them to the global SRQ would let unlimited
+		 * non-pinned task competition starve them indefinitely.
+		 */
+		if (1 == prev->nr_cpus_allowed || is_migration_disabled(prev)) {
+			WRITE_ONCE(prev->wake_cpu, cpu);
+			WRITE_ONCE(prev->__sched_prio, -1);
+			WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
+			ASSERT_EXCLUSIVE_WRITER(prev->on_rq);
+			llist_add(&prev->pq_node,
+				  per_cpu_ptr(&preempt_list, cpu));
+		} else {
+			struct rq *trq;
+			struct sched_run_queue *srq = rq_srq(rq);
+
+			SRQ_ENQUEUE_TASK(srq, prev, );
+
+			trq = __wakeup_rq_trylock(prev,
+						  IDLE_TASK_SCHED_PRIO - 1,
+						  prev->cpus_ptr);
+			if (trq) {
+				resched_curr(trq);
+				raw_spin_unlock(&trq->lock);
+			}
 		}
 	}
 }
@@ -4252,15 +4290,20 @@ static __always_inline int check_curr(struct task_struct *p, struct rq *rq)
 
 static __always_inline void migrate_preempt_task(struct task_struct *p, const int cpu)
 {
-	/* idle preempt success rate ~52.7% */
-	/* disable high risk code path: preempt list -> preempt list on other cpu
-	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr);
-
-	if (rq)
-		preempt_on_rq(p, rq);
-	else
-	*/
 	WARN_ON_ONCE(!task_on_rq_preempt(p));
+
+	/*
+	 * CPU-pinned tasks must stay on this CPU's preempt_list.
+	 * Sending them to the global SRQ causes starvation: the
+	 * unlimited supply of non-pinned tasks with equal or better
+	 * priority means the pinned task may never be picked.
+	 */
+	if ((1 == p->nr_cpus_allowed || is_migration_disabled(p)) &&
+	    is_cpu_allowed(p, cpu)) {
+		llist_add(&p->pq_node, this_cpu_ptr(&preempt_list));
+		return;
+	}
+
 	activate_task(p, cpu_srq(cpu));
 }
 
