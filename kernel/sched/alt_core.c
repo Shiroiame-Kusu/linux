@@ -593,12 +593,17 @@ static inline void sched_update_tick_dependency(struct rq *rq)
 		return;
 
 	/*
-	 * The tick must keep running whenever runnable tasks exist that
-	 * only this CPU can service — either pinned tasks on preempt_list
-	 * or global SRQ tasks.  Without the tick, timeslices never expire
-	 * and equal-or-lower-priority preempt_list tasks starve forever.
+	 * The tick must keep running whenever pinned tasks sit on the
+	 * per-CPU preempt_list.  Only this CPU can drain them, and without
+	 * tick interrupts timeslices never expire, so equal-or-lower-priority
+	 * preempt_list tasks starve forever.
+	 *
+	 * Global SRQ tasks do NOT need the tick here: any CPU can pick them,
+	 * and higher-priority arrivals send IPIs via resched_cpu().  Keeping
+	 * the tick for SRQ would defeat NO_HZ_FULL on every nohz_full CPU
+	 * whenever any SRQ work exists system-wide.
 	 */
-	if (srq_nr_queued(cpu) || !is_preempt_list_empty(cpu))
+	if (!is_preempt_list_empty(cpu))
 		tick_nohz_dep_set_cpu(cpu, TICK_DEP_BIT_SCHED);
 	else
 		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
