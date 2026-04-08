@@ -592,11 +592,16 @@ static inline void sched_update_tick_dependency(struct rq *rq)
 	if (!tick_nohz_full_cpu(cpu))
 		return;
 
-	if ((IDLE_TASK_SCHED_PRIO != READ_ONCE(cpu_prio[cpu])) &&
-	    (0 == srq_nr_queued(cpu)) && is_preempt_list_empty(cpu))
-		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
-	else
+	/*
+	 * The tick must keep running whenever runnable tasks exist that
+	 * only this CPU can service — either pinned tasks on preempt_list
+	 * or global SRQ tasks.  Without the tick, timeslices never expire
+	 * and equal-or-lower-priority preempt_list tasks starve forever.
+	 */
+	if (srq_nr_queued(cpu) || !is_preempt_list_empty(cpu))
 		tick_nohz_dep_set_cpu(cpu, TICK_DEP_BIT_SCHED);
+	else
+		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
 }
 #else /* !CONFIG_NO_HZ_FULL: */
 static inline void sched_update_tick_dependency(struct rq *rq) { }
@@ -3277,6 +3282,8 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 			}
 		}
 	}
+
+	sched_update_tick_dependency(rq);
 }
 
 static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
@@ -4632,6 +4639,7 @@ static void __sched notrace __schedule(int sched_mode)
 	expired = check_curr(rq->curr, rq);
 	next = pick_next_task(cpu, rq, expired);
 picked:
+	sched_update_tick_dependency(rq);
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
 	rq->last_seen_need_resched_ns = 0;
