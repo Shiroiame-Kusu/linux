@@ -188,3 +188,5 @@ sphinx_*/
 version
 localversion.20-pkgname
 localversion.10-pkgrel
+pkg/
+*.log
