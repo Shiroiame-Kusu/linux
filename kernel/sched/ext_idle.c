@@ -424,18 +424,24 @@ static inline bool task_affinity_all(const struct task_struct *p)
  *   - prefer the last used CPU to take advantage of cached data (L1, L2) and
  *     branch prediction optimizations.
  *
- * 3. Pick a CPU within the same LLC (Last-Level Cache):
+ * 3. Prefer @prev_cpu's SMT sibling:
+ *   - if @prev_cpu is busy and no fully idle core is available, try to
+ *     place the task on an idle SMT sibling of @prev_cpu; keeping the
+ *     task on the same core makes migration cheaper, preserves L1 cache
+ *     locality and reduces wakeup latency.
+ *
+ * 4. Pick a CPU within the same LLC (Last-Level Cache):
  *   - if the above conditions aren't met, pick a CPU that shares the same
  *     LLC, if the LLC domain is a subset of @cpus_allowed, to maintain
  *     cache locality.
  *
- * 4. Pick a CPU within the same NUMA node, if enabled:
+ * 5. Pick a CPU within the same NUMA node, if enabled:
  *   - choose a CPU from the same NUMA node, if the node cpumask is a
  *     subset of @cpus_allowed, to reduce memory access latency.
  *
- * 5. Pick any idle CPU within the @cpus_allowed domain.
+ * 6. Pick any idle CPU within the @cpus_allowed domain.
  *
- * Step 3 and 4 are performed only if the system has, respectively,
+ * Step 4 and 5 are performed only if the system has, respectively,
  * multiple LLCs / multiple NUMA nodes (see scx_selcpu_topo_llc and
  * scx_selcpu_topo_numa) and they don't contain the same subset of CPUs.
  *
@@ -543,7 +549,7 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 		 * piled up on it even if there is an idle core elsewhere on
 		 * the system.
 		 */
-		waker_node = cpu_to_node(cpu);
+		waker_node = scx_cpu_node_if_enabled(cpu);
 		if (!(current->flags & PF_EXITING) &&
 		    cpu_rq(cpu)->scx.local_dsq.nr == 0 &&
 		    (!(flags & SCX_PICK_IDLE_IN_NODE) || (waker_node == node)) &&
@@ -614,6 +620,18 @@ s32 scx_select_cpu_dfl(struct task_struct *p, s32 prev_cpu, u64 wake_flags,
 	if (is_prev_allowed && scx_idle_test_and_clear_cpu(prev_cpu)) {
 		cpu = prev_cpu;
 		goto out_unlock;
+	}
+
+	/*
+	 * Use @prev_cpu's sibling if it's idle.
+	 */
+	if (sched_smt_active()) {
+		for_each_cpu_and(cpu, cpu_smt_mask(prev_cpu), allowed) {
+			if (cpu == prev_cpu)
+				continue;
+			if (scx_idle_test_and_clear_cpu(cpu))
+				goto out_unlock;
+		}
 	}
 
 	/*
@@ -860,25 +878,32 @@ static bool check_builtin_idle_enabled(struct scx_sched *sch)
  * code.
  *
  * We can't simply check whether @p->migration_disabled is set in a
- * sched_ext callback, because migration is always disabled for the current
- * task while running BPF code.
+ * sched_ext callback, because the BPF prolog (__bpf_prog_enter) may disable
+ * migration for the current task while running BPF code.
  *
- * The prolog (__bpf_prog_enter) and epilog (__bpf_prog_exit) respectively
- * disable and re-enable migration. For this reason, the current task
- * inside a sched_ext callback is always a migration-disabled task.
+ * Since the BPF prolog calls migrate_disable() only when CONFIG_PREEMPT_RCU
+ * is enabled (via rcu_read_lock_dont_migrate()), migration_disabled == 1 for
+ * the current task is ambiguous only in that case: it could be from the BPF
+ * prolog rather than a real migrate_disable() call.
  *
- * Therefore, when @p->migration_disabled == 1, check whether @p is the
- * current task or not: if it is, then migration was not disabled before
- * entering the callback, otherwise migration was disabled.
+ * Without CONFIG_PREEMPT_RCU, the BPF prolog never calls migrate_disable(),
+ * so migration_disabled == 1 always means the task is truly
+ * migration-disabled.
+ *
+ * Therefore, when migration_disabled == 1 and CONFIG_PREEMPT_RCU is enabled,
+ * check whether @p is the current task or not: if it is, then migration was
+ * not disabled before entering the callback, otherwise migration was disabled.
  *
  * Returns true if @p is migration-disabled, false otherwise.
  */
 static bool is_bpf_migration_disabled(const struct task_struct *p)
 {
-	if (p->migration_disabled == 1)
-		return p != current;
-	else
-		return p->migration_disabled;
+	if (p->migration_disabled == 1) {
+		if (IS_ENABLED(CONFIG_PREEMPT_RCU))
+			return p != current;
+		return true;
+	}
+	return p->migration_disabled;
 }
 
 static s32 select_cpu_from_kfunc(struct scx_sched *sch, struct task_struct *p,

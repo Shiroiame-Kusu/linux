@@ -716,7 +716,7 @@ void update_zero_vruntime(struct cfs_rq *cfs_rq, s64 delta)
  * Called in:
  *  - place_entity()      -- before enqueue
  *  - update_entity_lag() -- before dequeue
- *  - entity_tick()
+ *  - update_deadline()   -- slice expiration
  *
  * This means it is one entry 'behind' but that puts it close enough to where
  * the bound on entity_key() is at most two lag bounds.
@@ -1140,6 +1140,7 @@ static bool update_deadline(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	 * EEVDF: vd_i = ve_i + r_i / w_i
 	 */
 	se->deadline = se->vruntime + calc_delta_fair(se->slice, se);
+	avg_vruntime(cfs_rq);
 
 	/*
 	 * The task has consumed its request, reschedule.
@@ -5602,11 +5603,6 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 	update_load_avg(cfs_rq, curr, UPDATE_TG);
 	update_cfs_group(curr);
 
-	/*
-	 * Pulls along cfs_rq::zero_vruntime.
-	 */
-	avg_vruntime(cfs_rq);
-
 #ifdef CONFIG_SCHED_HRTICK
 	/*
 	 * queued ticks are scheduled to match the slice, so don't bother
@@ -9242,7 +9238,7 @@ static void yield_task_fair(struct rq *rq)
 	 */
 	if (entity_eligible(cfs_rq, se)) {
 		se->vruntime = se->deadline;
-		se->deadline += calc_delta_fair(se->slice, se);
+		update_deadline(cfs_rq, se);
 	}
 }
 
@@ -12050,11 +12046,14 @@ redo:
 		 * still unbalanced. ld_moved simply stays zero, so it is
 		 * correctly treated as an imbalance.
 		 */
-		env.loop_max  = min(sysctl_sched_nr_migrate, busiest->nr_running);
-
 more_balance:
 		rq_lock_irqsave(busiest, &rf);
 		update_rq_clock(busiest);
+
+		if (!env.loop_max)
+			env.loop_max  = min(sysctl_sched_nr_migrate, busiest->cfs.h_nr_queued);
+		else
+			env.loop_max  = min(env.loop_max, busiest->cfs.h_nr_queued);
 
 		/*
 		 * cur_ld_moved - load moved in current iteration
@@ -12397,26 +12396,10 @@ void update_max_interval(void)
 	max_load_balance_interval = HZ*num_online_cpus()/10;
 }
 
-static inline void update_newidle_stats(struct sched_domain *sd, unsigned int success)
-{
-	sd->newidle_call++;
-	sd->newidle_success += success;
-
-	if (sd->newidle_call >= 1024) {
-		sd->newidle_ratio = sd->newidle_success;
-		sd->newidle_call /= 2;
-		sd->newidle_success /= 2;
-	}
-}
-
-static inline bool
-update_newidle_cost(struct sched_domain *sd, u64 cost, unsigned int success)
+static inline bool update_newidle_cost(struct sched_domain *sd, u64 cost)
 {
 	unsigned long next_decay = sd->last_decay_max_lb_cost + HZ;
 	unsigned long now = jiffies;
-
-	if (cost)
-		update_newidle_stats(sd, success);
 
 	if (cost > sd->max_newidle_lb_cost) {
 		/*
@@ -12465,7 +12448,7 @@ static void sched_balance_domains(struct rq *rq, enum cpu_idle_type idle)
 		 * Decay the newidle max times here because this is a regular
 		 * visit to all the domains.
 		 */
-		need_decay = update_newidle_cost(sd, 0, 0);
+		need_decay = update_newidle_cost(sd, 0);
 		max_cost += sd->max_newidle_lb_cost;
 
 		/*
@@ -13108,22 +13091,6 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 			break;
 
 		if (sd->flags & SD_BALANCE_NEWIDLE) {
-			unsigned int weight = 1;
-
-			if (sched_feat(NI_RANDOM)) {
-				/*
-				 * Throw a 1k sided dice; and only run
-				 * newidle_balance according to the success
-				 * rate.
-				 */
-				u32 d1k = sched_rng() % 1024;
-				weight = 1 + sd->newidle_ratio;
-				if (d1k > weight) {
-					update_newidle_stats(sd, 0);
-					continue;
-				}
-				weight = (1024 + weight/2) / weight;
-			}
 
 			pulled_task = sched_balance_rq(this_cpu, this_rq,
 						   sd, CPU_NEWLY_IDLE,
@@ -13131,14 +13098,10 @@ static int sched_balance_newidle(struct rq *this_rq, struct rq_flags *rf)
 
 			t1 = sched_clock_cpu(this_cpu);
 			domain_cost = t1 - t0;
+			update_newidle_cost(sd, domain_cost);
+
 			curr_cost += domain_cost;
 			t0 = t1;
-
-			/*
-			 * Track max cost of a domain to make sure to not delay the
-			 * next wakeup on the CPU.
-			 */
-			update_newidle_cost(sd, domain_cost, weight * !!pulled_task);
 		}
 
 		/*
