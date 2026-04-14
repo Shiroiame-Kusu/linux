@@ -1,0 +1,11 @@
+--- Makefile
++++ Makefile
+@@ -867,7 +867,7 @@ endif # need-config
+ KBUILD_CFLAGS	+= -fno-delete-null-pointer-checks
+ 
+ ifdef CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE
+-KBUILD_CFLAGS += -O2
++KBUILD_CFLAGS += -O3
+ # Enable software pipelining (Swing Modulo Scheduling) for innermost loops.
+ KBUILD_CFLAGS += $(call cc-option,-fmodulo-sched -fmodulo-sched-allow-regmoves) \
+ 		 $(call cc-option,-mllvm -enable-pipeliner)
