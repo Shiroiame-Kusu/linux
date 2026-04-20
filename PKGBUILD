@@ -33,7 +33,25 @@ makedepends=(
     lld
 )
 
+### Build nvidia open modules
+: "${_build_nvidia_open:=yes}"
+
+_patchsource="https://raw.githubusercontent.com/cachyos/kernel-patches/master/${_major}"
+_nv_ver=595.58.03
+_nv_pkg="NVIDIA-Linux-x86_64-${_nv_ver}"
+_nv_open_pkg="NVIDIA-kernel-module-source-${_nv_ver}"
+
 source=()
+
+if [ "$_build_nvidia_open" = "yes" ]; then
+    source+=("https://download.nvidia.com/XFree86/${_nv_open_pkg%"-$_nv_ver"}/${_nv_open_pkg}.tar.xz"
+             "${_patchsource}/misc/nvidia/0002-Add-IBT-support.patch"
+             "${_patchsource}/misc/nvidia/0004-HACK-kernel-open-Makefile-Remove-PAHOLE_VARIABLE.patch"
+             "${_patchsource}/misc/nvidia/0003-fix-dsc-correct-RC-parameter-tables-to-match-VESA-DS.patch"
+             "${_patchsource}/misc/nvidia/0004-fix-dsc-use-bits_per_component-for-flatnessDetThresh.patch"
+             "${_patchsource}/misc/nvidia/0005-fix-dp-add-Bigscreen-Beyond-VR-headset-to-WAR-databa.patch")
+fi
+
 b2sums=()
 
 export KBUILD_BUILD_HOST=cachyos
@@ -50,25 +68,55 @@ BUILD_FLAGS=(
 prepare() {
     cd "$srcdir/../"
 
+    # Apply nvidia patches
+    if [ "$_build_nvidia_open" = "yes" ]; then
+        local src
+        for patch in "${source[@]}"; do
+            patch="${patch%%::*}"
+            src="${patch##*/}"
+            src="${src%.zst}"
+            [[ $src = *.patch ]] || continue
+            echo "Applying patch $src..."
+            if [[ "$patch" == "${_patchsource}"/misc/nvidia/* ]]; then
+                patch -Np1 < "${srcdir}/$src" -d "${srcdir}/${_nv_open_pkg}"
+            else
+                patch -Np1 < "${srcdir}/$src"
+            fi
+        done
+    fi
+
     echo "Setting version..."
     echo "-$pkgrel" > localversion.10-pkgrel
     echo "${pkgbase#linux}" > localversion.20-pkgname
 
     echo "Preparing build..."
     make "${BUILD_FLAGS[@]}" prepare
-    
+
     make -s kernelrelease > version
     echo "Prepared $pkgbase version $(<version)"
 }
 
 build() {
     cd "$srcdir/../"
-    
+
     echo "Building kernel..."
-    make "${BUILD_FLAGS[@]}" -j"$(nproc)" all
+    make "${BUILD_FLAGS[@]}" -j"$(($(nproc) - 2))" all
 
     echo "Building bpftool vmlinux.h..."
     make -C tools/bpf/bpftool vmlinux.h feature-clang-bpf-co-re=1
+
+    local MODULE_FLAGS=(
+        KERNEL_UNAME="${_kernuname}"
+        IGNORE_PREEMPT_RT_PRESENCE=1
+        SYSSRC="${srcdir}/../"
+        SYSOUT="${srcdir}/../"
+    )
+
+    if [ "$_build_nvidia_open" = "yes" ]; then
+        cd "${srcdir}/${_nv_open_pkg}"
+        MODULE_FLAGS+=(IGNORE_CC_MISMATCH=yes)
+        CFLAGS= CXXFLAGS= LDFLAGS= make "${BUILD_FLAGS[@]}" "${MODULE_FLAGS[@]}" -j"$(($(nproc) - 2))" modules
+    fi
 }
 
 _package() {
@@ -181,7 +229,24 @@ _package-headers() {
     ln -sr "$builddir" "$pkgdir/usr/src/$pkgbase"
 }
 
+_package-nvidia-open(){
+    pkgdesc="nvidia open modules of ${_nv_ver} driver for the ${pkgbase} kernel"
+    depends=("$pkgbase=$_kernver" "nvidia-utils=${_nv_ver}" "libglvnd")
+    provides=('NVIDIA-MODULE')
+    conflicts=("$pkgbase-nvidia")
+    license=('MIT AND GPL-2.0-only')
+
+    cd "$srcdir/../"
+    local modulesdir="$pkgdir/usr/lib/modules/$(<version)/extramodules"
+
+    cd "${srcdir}/${_nv_open_pkg}"
+    install -dm755 "${modulesdir}"
+    install -m644 kernel-open/*.ko "${modulesdir}"
+    install -Dt "$pkgdir/usr/share/licenses/${pkgname}" -m644 COPYING
+}
+
 pkgname=("$pkgbase" "$pkgbase-headers")
+[ "$_build_nvidia_open" = "yes" ] && pkgname+=("$pkgbase-nvidia-open")
 
 for _p in "${pkgname[@]}"; do
     eval "package_$_p() {
