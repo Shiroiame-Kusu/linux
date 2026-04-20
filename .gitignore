@@ -185,3 +185,6 @@ sphinx_*/
 
 # Rust analyzer configuration
 /rust-project.json
+localversion*
+pkg*
+version*
