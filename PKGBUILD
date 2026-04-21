@@ -1,13 +1,13 @@
 # Simplified PKGBUILD for pre-configured kernel source
 # Original: CachyOS linux-cachyos
-_pkgsuffix="cachyos-hakuu-flto"
+_pkgsuffix="cachyos-bmq-hakuu-tlto"
 pkgbase="linux-$_pkgsuffix"
 _major=7.0
 _minor=0
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
-pkgrel=1
+pkgrel=2
 pkgdesc='Linux CachyOS Kernel (pre-configured build) by Hakuu'
 arch=('x86_64')
 url="https://github.com/CachyOS/linux-cachyos"
@@ -34,7 +34,7 @@ makedepends=(
 )
 
 ### Build nvidia open modules
-: "${_build_nvidia_open:=yes}"
+: "${_build_nvidia_open:=no}"
 
 _patchsource="https://raw.githubusercontent.com/cachyos/kernel-patches/master/${_major}"
 _nv_ver=595.58.03
