@@ -3,11 +3,11 @@
 _pkgsuffix="cachyos-bmq-hakuu-tlto"
 pkgbase="linux-$_pkgsuffix"
 _major=7.0
-_minor=0
+_minor=1
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
-pkgrel=3
+pkgrel=1
 pkgdesc='Linux CachyOS Kernel (pre-configured build) by Hakuu'
 arch=('x86_64')
 url="https://github.com/CachyOS/linux-cachyos"
