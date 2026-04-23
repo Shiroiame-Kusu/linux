@@ -3,7 +3,7 @@
 _pkgsuffix="cachyos-hakuu-flto"
 pkgbase="linux-$_pkgsuffix"
 _major=7.0
-_minor=0
+_minor=1
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
