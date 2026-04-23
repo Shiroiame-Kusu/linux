@@ -100,6 +100,7 @@ build() {
     cd "$srcdir/../"
 
     echo "Building kernel..."
+    cp config .config
     make "${BUILD_FLAGS[@]}" -j"$(($(nproc) - 2))" all
 
     echo "Building bpftool vmlinux.h..."
