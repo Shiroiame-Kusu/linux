@@ -86,7 +86,7 @@ __read_mostly int sysctl_resched_latency_warn_once = 1;
  * Time slice
  * (default: 4 msec, units: nanoseconds)
  */
-unsigned int sysctl_sched_base_slice __read_mostly	= (4 << 20);
+unsigned int sysctl_sched_base_slice __read_mostly	= (1 << 20);
 
 #include "alt_core.h"
 
