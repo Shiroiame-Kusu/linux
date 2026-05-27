@@ -7,7 +7,6 @@
 #define _ISP4_FW_CMD_RESP_H_
 
 /*
- * @brief Host and Firmware command & response channel.
  *        Two types of command/response channel.
  *          Type Global Command has one command/response channel.
  *          Type Stream Command has one command/response channel.
@@ -40,7 +39,6 @@
  */
 
 /*
- * @brief command ID format
  *        cmd_id is in the format of following type:
  *        type: indicate command type, global/stream commands.
  *        group: indicate the command group.
@@ -73,7 +71,6 @@
 					 | ISP4FW_CMD_GROUP_STREAM_BUFFER | 0x1)
 
 /*
- * @brief response ID format
  *        resp_id is in the format of following type:
  *        type: indicate command type, global/stream commands.
  *        group: indicate the command group.
@@ -259,7 +256,7 @@ struct isp4fw_image_prop {
 struct isp4fw_buffer {
 	/*
 	 * A check num for debug usage, host can set the buf_tags
-	 * to different number
+	 * to different numbers
 	 */
 	u32 buf_tags;
 	union {

@@ -13,7 +13,7 @@
 
 #define ISP4VID_ISP_DRV_NAME "amd_isp_capture"
 #define ISP4VID_MAX_PREVIEW_FPS 30
-#define ISP4VID_DEFAULT_FMT isp4vid_formats[0]
+#define ISP4VID_DEFAULT_FMT V4L2_PIX_FMT_NV12
 
 #define ISP4VID_PAD_VIDEO_OUTPUT 0
 

@@ -127,7 +127,7 @@ isp4if_gpu_mem_alloc(struct isp4_interface *ispif, u32 mem_size)
 	struct device *dev = ispif->dev;
 	int ret;
 
-	mem_info = kmalloc(sizeof(*mem_info), GFP_KERNEL);
+	mem_info = kmalloc_obj(*mem_info, GFP_KERNEL);
 	if (!mem_info)
 		return NULL;
 
@@ -247,7 +247,10 @@ static bool isp4if_is_cmdq_rb_full(struct isp4_interface *ispif,
 	rd_ptr = isp4hw_rreg(ispif->mmio, rreg);
 	wr_ptr = isp4hw_rreg(ispif->mmio, wreg);
 
-	/* Read and write pointers are equal, indicating the ringbuf is empty */
+	/*
+	 * Read and write pointers are equal, indicating the ring buffer
+	 * is empty
+	 */
 	if (wr_ptr == rd_ptr)
 		return false;
 
@@ -258,8 +261,8 @@ static bool isp4if_is_cmdq_rb_full(struct isp4_interface *ispif,
 
 	/*
 	 * Ignore one byte from the bytes free to prevent rd_ptr from equaling
-	 * wr_ptr when the ringbuf is full, because rd_ptr == wr_ptr is
-	 * supposed to indicate that the ringbuf is empty.
+	 * wr_ptr when the ring buffer is full, because rd_ptr == wr_ptr is
+	 * supposed to indicate that the ring buffer is empty.
 	 */
 	return bytes_free <= sizeof(struct isp4fw_cmd);
 }
@@ -312,7 +315,10 @@ static int isp4if_insert_isp_fw_cmd(struct isp4_interface *ispif,
 		memcpy(mem_sys + wr_ptr, src, cmd_sz);
 		isp4hw_wreg(ispif->mmio, wreg, (wr_ptr + cmd_sz) % len);
 	} else {
-		/* FW cmd is split because the ringbuf needs to wrap around */
+		/*
+		 * FW cmd is split because the ring buffer needs to wrap
+		 * around
+		 */
 		memcpy(mem_sys + wr_ptr, src, bytes_to_end);
 		memcpy(mem_sys, src + bytes_to_end, cmd_sz - bytes_to_end);
 		isp4hw_wreg(ispif->mmio, wreg, cmd_sz - bytes_to_end);
@@ -364,7 +370,7 @@ static int isp4if_send_fw_cmd(struct isp4_interface *ispif, u32 cmd_id,
 
 	/* Allocate the sync command object early and outside of the lock */
 	if (sync) {
-		ele = kmalloc(sizeof(*ele), GFP_KERNEL);
+		ele = kmalloc_obj(*ele, GFP_KERNEL);
 		if (!ele)
 			return -ENOMEM;
 
@@ -651,7 +657,10 @@ int isp4if_f2h_resp(struct isp4_interface *ispif, enum isp4if_stream_id stream,
 	if (rd_ptr >= len || wr_ptr >= len)
 		goto err_rb_invalid;
 
-	/* Read and write pointers are equal, indicating the ringbuf is empty */
+	/*
+	 * Read and write pointers are equal, indicating the ring buffer is
+	 * empty
+	 */
 	if (rd_ptr == wr_ptr)
 		return -ENODATA;
 
@@ -664,7 +673,10 @@ int isp4if_f2h_resp(struct isp4_interface *ispif, enum isp4if_stream_id stream,
 		memcpy(dst, mem_sys + rd_ptr, resp_sz);
 		isp4hw_wreg(ispif->mmio, rreg, (rd_ptr + resp_sz) % len);
 	} else {
-		/* FW response is split because the ringbuf wrapped around */
+		/*
+		 * FW response is split because the ring buffer wrapped
+		 * around
+		 */
 		if (wr_ptr > rd_ptr || wr_ptr < resp_sz - bytes_to_end)
 			goto err_rb_invalid;
 
@@ -728,7 +740,7 @@ isp4if_alloc_buffer_node(struct isp4if_img_buf_info *buf_info)
 {
 	struct isp4if_img_buf_node *node;
 
-	node = kmalloc(sizeof(*node), GFP_KERNEL);
+	node = kmalloc_obj(*node, GFP_KERNEL);
 	if (node)
 		node->buf_info = *buf_info;
 

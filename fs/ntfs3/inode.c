@@ -651,8 +651,7 @@ static void ntfs_iomap_bio_submit_read(struct iomap_read_folio_ctx *ctx)
 {
 	struct bio *bio = ctx->read_ctx;
 
-	if (bio)
-		submit_bio(bio);
+	submit_bio(bio);
 }
 
 static const struct iomap_read_ops ntfs_iomap_bio_read_ops = {
@@ -818,6 +817,11 @@ static int ntfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 		return err;
 	}
 
+	if (!clen) {
+		/* broken file? */
+		return -EINVAL;
+	}
+
 	if (lcn == EOF_LCN) {
 		/* request out of file. */
 		if (flags & IOMAP_REPORT) {
@@ -849,11 +853,6 @@ static int ntfs_iomap_begin(struct inode *inode, loff_t offset, loff_t length,
 		iomap->offset = 0;
 		iomap->length = clen; /* resident size in bytes. */
 		return 0;
-	}
-
-	if (!clen) {
-		/* broken file? */
-		return -EINVAL;
 	}
 
 	iomap->bdev = inode->i_sb->s_bdev;
