@@ -3,7 +3,7 @@
 _pkgsuffix="cachyos-hakuu-flto"
 pkgbase="linux-$_pkgsuffix"
 _major=7.0
-_minor=1
+_minor=10
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
@@ -34,7 +34,7 @@ makedepends=(
 )
 
 ### Build nvidia open modules
-: "${_build_nvidia_open:=yes}"
+: "${_build_nvidia_open:=no}"
 
 _patchsource="https://raw.githubusercontent.com/cachyos/kernel-patches/master/${_major}"
 _nv_ver=595.58.03
