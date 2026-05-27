@@ -3263,6 +3263,7 @@ static int cpuset_can_attach_check(struct cpuset *cs, struct cpuset *oldcs,
 	return 0;
 }
 
+#ifndef CONFIG_SCHED_ALT
 static int cpuset_reserve_dl_bw(void)
 {
 	struct cpuset *cs;
@@ -3284,6 +3285,7 @@ static int cpuset_reserve_dl_bw(void)
 	}
 	return 0;
 }
+#endif /* !CONFIG_SCHED_ALT */
 
 /*
  * Clear and optionally apply (@cancel is false) the attach related data in the
@@ -3296,6 +3298,7 @@ static void clear_attach_data(struct llist_head *head, bool cancel)
 
 	llist_for_each_entry_safe(cs, next, lnode, attach_node) {
 		init_llist_node(&cs->attach_node);
+#ifndef CONFIG_SCHED_ALT
 		if (cs->nr_migrate_dl_tasks) {
 			if (!cancel)
 				atomic_add(cs->nr_migrate_dl_tasks, &cs->nr_deadline_tasks);
@@ -3305,6 +3308,7 @@ static void clear_attach_data(struct llist_head *head, bool cancel)
 			cs->sum_migrate_dl_bw = 0;
 			cs->dl_bw_cpu = -1;
 		}
+#endif /* !CONFIG_SCHED_ALT */
 	}
 }
 
@@ -3381,6 +3385,7 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 				goto out_unlock;
 		}
 
+#ifndef CONFIG_SCHED_ALT
 		if (dl_task(task)) {
 			/*
 			 * Count all migrating DL tasks for cpuset task accounting.
@@ -3392,6 +3397,7 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 			if (dl_task_needs_bw_move(task, cs->effective_cpus))
 				cs->sum_migrate_dl_bw += task->dl.dl_bw;
 		}
+#endif /* !CONFIG_SCHED_ALT */
 	}
 
 	/*
@@ -3410,7 +3416,11 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 		goto out_unlock;
 	}
 
+#ifndef CONFIG_SCHED_ALT
 	ret = cpuset_reserve_dl_bw();
+#else /* !CONFIG_SCHED_ALT */
+	ret = 0;
+#endif /* CONFIG_SCHED_ALT */
 
 out_unlock:
 	if (ret) {
