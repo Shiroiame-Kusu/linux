@@ -188,3 +188,4 @@ sphinx_*/
 localversion*
 pkg*
 version*
+*.log
