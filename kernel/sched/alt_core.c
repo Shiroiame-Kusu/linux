@@ -319,12 +319,36 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
+		} else if (task_on_rq_preempt(p)) {
+			int wake_cpu = READ_ONCE(p->wake_cpu);
+			struct rq *rq = cpu_rq(wake_cpu);
+
+			raw_spin_lock(&rq->lock);
+			if (likely(task_on_rq_preempt(p) &&
+				   wake_cpu == READ_ONCE(p->wake_cpu) &&
+				   rq == task_rq(p))) {
+				rf->lock = &rq->lock;
+				rf->queued = false;
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
 		} else if (task_on_rq_queued(p)) {
 			if (p->on_cpu) {
 				struct rq *rq = task_rq(p);
 
 				raw_spin_lock(&rq->lock);
 				if (likely(p->on_cpu && rq == task_rq(p))) {
+					rf->lock = &rq->lock;
+					return rq;
+				}
+				raw_spin_unlock(&rq->lock);
+			} else if (READ_ONCE(p->__sched_prio) == -1) {
+				struct rq *rq = task_rq(p);
+
+				raw_spin_lock(&rq->lock);
+				if (task_on_rq_queued(p) && !p->on_cpu &&
+				    READ_ONCE(p->__sched_prio) == -1 &&
+				    rq == task_rq(p)) {
 					rf->lock = &rq->lock;
 					return rq;
 				}
@@ -359,6 +383,21 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 
 	for (;;) {
 		raw_spin_lock_irqsave(&p->pi_lock, rf->flags);
+		if (task_on_rq_preempt(p)) {
+			int wake_cpu = READ_ONCE(p->wake_cpu);
+
+			rq = cpu_rq(wake_cpu);
+			raw_spin_lock(&rq->lock);
+			if (likely(task_on_rq_preempt(p) &&
+				   wake_cpu == READ_ONCE(p->wake_cpu) &&
+				   rq == task_rq(p))) {
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
+			raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+			continue;
+		}
+
 		rq = task_rq(p);
 		raw_spin_lock(&rq->lock);
 		/*
@@ -378,7 +417,8 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		 * dependency headed by '[L] rq = task_rq()' and the acquire
 		 * will pair with the WMB to ensure we then also see migrating.
 		 */
-		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p))) {
+		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p) &&
+			   !task_on_rq_preempt(p))) {
 			return rq;
 		}
 		raw_spin_unlock(&rq->lock);
@@ -1071,7 +1111,7 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 		__task_rq_lock(p, &rf);
 		trace_sched_wait_task(p);
 		running = task_on_cpu(p);
-		queued = task_on_rq_queued(p);
+		queued = task_on_rq_queued(p) || task_on_rq_preempt(p);
 		ncsw = 0;
 		if ((match = __task_state_match(p, match_state))) {
 			/*
@@ -2110,21 +2150,46 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 	struct rq *rq;
 	int ret = 0;
 
-	rq = task_rq(p);
-	raw_spin_lock(&rq->lock);
-	if (task_on_rq_queued(p)) {
-		update_rq_clock(rq);
-		if (!task_on_cpu(p)) {
-			/*
-			 * When on_rq && !on_cpu the task is preempted, see if
-			 * it should preempt the task that is current now.
-			 */
-			if (task_sched_prio(p) < READ_ONCE(cpu_prio[cpu_of(rq)])) {
-				resched_curr(rq);
+	for (;;) {
+		if (task_on_rq_preempt(p)) {
+			int wake_cpu = READ_ONCE(p->wake_cpu);
+
+			rq = cpu_rq(wake_cpu);
+			raw_spin_lock(&rq->lock);
+			if (likely(task_on_rq_preempt(p) &&
+				   wake_cpu == READ_ONCE(p->wake_cpu) &&
+				   rq == task_rq(p))) {
+				update_rq_clock(rq);
+				if (task_sched_prio(p) < READ_ONCE(cpu_prio[cpu_of(rq)]))
+					resched_curr(rq);
+				ttwu_do_wakeup(p);
+				ret = 1;
+				break;
 			}
+			raw_spin_unlock(&rq->lock);
+			continue;
 		}
-		ttwu_do_wakeup(p);
-		ret = 1;
+
+		rq = task_rq(p);
+		raw_spin_lock(&rq->lock);
+		if (task_on_rq_preempt(p)) {
+			raw_spin_unlock(&rq->lock);
+			continue;
+		} else if (task_on_rq_queued(p)) {
+			update_rq_clock(rq);
+			if (!task_on_cpu(p)) {
+				/*
+				 * When on_rq && !on_cpu the task is preempted, see if
+				 * it should preempt the task that is current now.
+				 */
+				if (task_sched_prio(p) < READ_ONCE(cpu_prio[cpu_of(rq)])) {
+					resched_curr(rq);
+				}
+			}
+			ttwu_do_wakeup(p);
+			ret = 1;
+		}
+		break;
 	}
 	raw_spin_unlock(&rq->lock);
 
@@ -3622,7 +3687,7 @@ unsigned long long task_sched_runtime(struct task_struct *p)
 	 * If we see ->on_cpu without ->on_rq, the task is leaving, and has
 	 * been accounted, so we're correct here as well.
 	 */
-	if (!p->on_cpu || !task_on_rq_queued(p))
+	if (!p->on_cpu || (!task_on_rq_queued(p) && !task_on_rq_preempt(p)))
 		return tsk_seruntime(p);
 #endif
 
@@ -5922,7 +5987,7 @@ static void dump_rq_tasks(struct rq *rq, const char *loglvl)
 		if (task_cpu(p) != cpu)
 			continue;
 
-		if (!task_on_rq_queued(p))
+		if (!task_on_rq_queued(p) && !task_on_rq_preempt(p))
 			continue;
 
 		printk("%s\tpid: %d, name: %s\n", loglvl, p->pid, p->comm);
@@ -7299,7 +7364,7 @@ struct sched_change_ctx *sched_change_begin(struct task_struct *p, unsigned int 
 	*ctx = (struct sched_change_ctx){
 		.p = p,
 		.flags = flags,
-		.queued = task_on_rq_queued(p),
+		.queued = task_on_rq_queued(p) || task_on_rq_preempt(p),
 		.running = (p == rq->curr),
 	};
 

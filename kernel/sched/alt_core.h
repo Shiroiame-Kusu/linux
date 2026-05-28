@@ -211,6 +211,19 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
+		} else if (task_on_rq_preempt(p)) {
+			int wake_cpu = READ_ONCE(p->wake_cpu);
+			struct rq *rq = cpu_rq(wake_cpu);
+
+			raw_spin_lock(&rq->lock);
+			if (likely(task_on_rq_preempt(p) &&
+				   wake_cpu == READ_ONCE(p->wake_cpu) &&
+				   rq == task_rq(p))) {
+				rf->lock = &rq->lock;
+				rf->queued = false;
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
 		} else if (task_on_rq_queued(p)) {
 			int idx;
 			if (p->on_cpu) {
@@ -245,6 +258,18 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 					return task_rq(p);
 				}
 				raw_spin_unlock(lock);
+			} else {
+				struct rq *rq = task_rq(p);
+
+				raw_spin_lock(&rq->lock);
+				if (task_on_rq_queued(p) && !p->on_cpu &&
+				    READ_ONCE(p->__sched_prio) == -1 &&
+				    rq == task_rq(p)) {
+					rf->lock = &rq->lock;
+					rf->queued = false;
+					return rq;
+				}
+				raw_spin_unlock(&rq->lock);
 			}
 		} else if (task_on_rq_migrating(p)) {
 			do {
