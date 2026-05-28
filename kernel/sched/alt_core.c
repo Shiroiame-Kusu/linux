@@ -1428,6 +1428,7 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	 */
 	WARN_ON_ONCE(state != TASK_RUNNING && !task_on_rq_queued(p) &&
 		     !task_on_rq_preempt(p) &&
+		     !task_on_rq_migrating(p) &&
 		     TASK_ON_RQ_WAKING != p->on_rq);
 
 	/*
