@@ -1299,9 +1299,11 @@ static inline void activate_task(struct task_struct *p, struct sched_run_queue *
 	//cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT * p->in_iowait);
 }
 
+static inline bool is_cpu_allowed(struct task_struct *p, int cpu);
 static inline struct rq *wakeup_rq_trylock(const struct task_struct *p);
 
-static __always_inline bool wakeup_rq_kick(const struct task_struct *p)
+static __always_inline int wakeup_rq_kick_cpu(struct task_struct *p,
+					      const int skip_cpu)
 {
 	const int sched_prio = task_sched_prio(p);
 	const int preempt_idx = SCHED_LEVELS - 1 - sched_prio;
@@ -1312,40 +1314,77 @@ static __always_inline bool wakeup_rq_kick(const struct task_struct *p)
 
 	if (1 == p->nr_cpus_allowed || is_migration_disabled(p)) {
 		cpu = is_migration_disabled(p) ? task_cpu(p) : cpumask_any(p->cpus_ptr);
-		if (cpu < nr_cpu_ids && sched_prio <= READ_ONCE(cpu_prio[cpu])) {
-			resched_cpu(cpu);
-			return true;
-		}
+		if (cpu < nr_cpu_ids && cpu != skip_cpu &&
+		    sched_prio <= READ_ONCE(cpu_prio[cpu]))
+			return cpu;
 
-		return false;
+		return nr_cpu_ids;
 	}
 
+	if (filter_test_cpu && cpu != skip_cpu && is_cpu_allowed(p, cpu) &&
+	    IDLE_TASK_SCHED_PRIO == READ_ONCE(cpu_prio[cpu]))
+		return cpu;
+
+	for_each_cpu_and(cpu, p->cpus_ptr, sched_idle_mask)
+		if (cpu != skip_cpu && is_cpu_allowed(p, cpu))
+			return cpu;
+
+	cpu = task_cpu(p);
 	for_each_set_bit(idx, cpu_sched_prio_bitmap, preempt_idx) {
 		cpumask_t *mask;
 		const struct cpumask *prio_mask = cpu_sched_prio_mask + idx;
 
-		if (filter_test_cpu && cpumask_test_cpu(cpu, prio_mask)) {
-			resched_cpu(cpu);
-			return true;
-		}
+		if (filter_test_cpu && cpu != skip_cpu &&
+		    cpumask_test_cpu(cpu, prio_mask))
+			return cpu;
 
 		for (mask = per_cpu(cpu_affinity_masks, cpu); mask < end_mask; mask++) {
 			int i;
 
 			for_each_cpu_and(i, p->cpus_ptr, mask)
-				if (cpumask_test_cpu(i, prio_mask)) {
-					resched_cpu(i);
-					return true;
-				}
+				if (i != skip_cpu && cpumask_test_cpu(i, prio_mask))
+					return i;
 		}
 	}
 
-	return false;
+	return nr_cpu_ids;
+}
+
+static __always_inline bool wakeup_rq_kick(struct task_struct *p)
+{
+	int cpu = wakeup_rq_kick_cpu(p, -1);
+
+	if (cpu >= nr_cpu_ids)
+		return false;
+
+	resched_cpu(cpu);
+	return true;
+}
+
+static __always_inline int queued_task_tick_cpu(struct task_struct *p)
+{
+	int cpu = task_cpu(p);
+
+	if (cpu < nr_cpu_ids && is_cpu_allowed(p, cpu))
+		return cpu;
+
+	for_each_cpu(cpu, p->cpus_ptr)
+		if (is_cpu_allowed(p, cpu))
+			return cpu;
+
+	return nr_cpu_ids;
+}
+
+static __always_inline void update_queued_task_tick_dependency(int cpu)
+{
+	if (cpu < nr_cpu_ids)
+		sched_update_tick_dependency(cpu_rq(cpu));
 }
 
 static __always_inline void notify_queued_task(struct task_struct *p)
 {
 	struct rq *rq;
+	int cpu;
 
 	lockdep_assert_held(&p->pi_lock);
 
@@ -1356,7 +1395,11 @@ static __always_inline void notify_queued_task(struct task_struct *p)
 		return;
 	}
 
-	wakeup_rq_kick(p);
+	if (wakeup_rq_kick(p))
+		return;
+
+	cpu = queued_task_tick_cpu(p);
+	update_queued_task_tick_dependency(cpu);
 }
 
 static void block_task(struct rq *rq, struct task_struct *p)
@@ -4327,6 +4370,7 @@ static __always_inline int preempt_task_unique_cpu(struct task_struct *p)
 
 static __always_inline void migrate_preempt_task(struct task_struct *p, const int cpu)
 {
+	int kick_cpu, tick_cpu;
 	WARN_ON_ONCE(!task_on_rq_preempt(p));
 	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
 
@@ -4364,11 +4408,17 @@ static __always_inline void migrate_preempt_task(struct task_struct *p, const in
 	}
 
 	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr);
+	kick_cpu = rq ? nr_cpu_ids : wakeup_rq_kick_cpu(p, cpu);
+	tick_cpu = kick_cpu < nr_cpu_ids ? nr_cpu_ids : queued_task_tick_cpu(p);
 
 	activate_task(p, cpu_srq(cpu));
 	if (rq) {
 		resched_curr(rq);
 		raw_spin_unlock(&rq->lock);
+	} else {
+		if (kick_cpu < nr_cpu_ids)
+			kick_preempt_cpu(kick_cpu);
+		update_queued_task_tick_dependency(tick_cpu);
 	}
 }
 
