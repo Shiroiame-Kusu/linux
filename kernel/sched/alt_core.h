@@ -253,9 +253,12 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 
 					raw_spin_unlock(lock);
 
-					rf->lock = NULL;
+					struct rq *rq = task_rq(p);
+					raw_spin_lock(&rq->lock);
+
+					rf->lock = &rq->lock;
 					rf->queued = true;
-					return task_rq(p);
+					return rq;
 				}
 				raw_spin_unlock(lock);
 			} else {
