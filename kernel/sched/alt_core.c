@@ -1787,17 +1787,11 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p)
 	const int sched_prio = task_sched_prio(p);
 
 	if (1 == p->nr_cpus_allowed || is_migration_disabled(p)) {
-		/* Fastpath */
-		const int cpu = cpumask_any(p->cpus_ptr);
+		const int cpu = is_migration_disabled(p) ? task_cpu(p) : cpumask_any(p->cpus_ptr);
+		struct rq *rq = cpu_rq(cpu);
 
-		if (sched_prio < READ_ONCE(cpu_prio[cpu])) {
-			struct rq *rq = cpu_rq(cpu);
-
-			raw_spin_lock(&rq->lock);
-			return rq;
-		}
-
-		return NULL;
+		raw_spin_lock(&rq->lock);
+		return rq;
 	}
 
 	return __wakeup_rq_trylock(p, sched_prio, p->cpus_ptr);
@@ -3243,17 +3237,31 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 	 * Enqueue prev if not rq->idle and prev is not blocked
 	 */
 	if (prev != rq->idle && !rq->block) {
-		struct rq *trq;
-		struct sched_run_queue *srq = rq_srq(rq);
+		int cpu = cpu_of(rq);
 
-		SRQ_ENQUEUE_TASK(srq, prev, );
+		WARN_ON_ONCE(READ_ONCE(prev->__sched_prio) != -1);
 
-		trq = __wakeup_rq_trylock(prev, IDLE_TASK_SCHED_PRIO - 1, prev->cpus_ptr);
-		if (trq) {
-			resched_curr(trq);
-			raw_spin_unlock(&trq->lock);
+		if (1 == prev->nr_cpus_allowed || is_migration_disabled(prev)) {
+			WRITE_ONCE(prev->wake_cpu, cpu);
+			WRITE_ONCE(prev->__sched_prio, -1);
+			WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
+			ASSERT_EXCLUSIVE_WRITER(prev->on_rq);
+			llist_add(&prev->pq_node, per_cpu_ptr(&preempt_list, cpu));
+		} else {
+			struct rq *trq;
+			struct sched_run_queue *srq = rq_srq(rq);
+
+			SRQ_ENQUEUE_TASK(srq, prev, );
+
+			trq = __wakeup_rq_trylock(prev, IDLE_TASK_SCHED_PRIO - 1, prev->cpus_ptr);
+			if (trq) {
+				resched_curr(trq);
+				raw_spin_unlock(&trq->lock);
+			}
 		}
 	}
+
+	sched_update_tick_dependency(rq);
 }
 
 static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
@@ -4265,17 +4273,102 @@ static __always_inline int check_curr(struct task_struct *p, struct rq *rq)
 	return 0;
 }
 
+static __always_inline void wakeup_srq_task(const int cpu);
+
+static __always_inline bool preempt_task_can_run_on(struct task_struct *p, const int cpu)
+{
+	if (is_migration_disabled(p))
+		return task_cpu(p) == cpu && cpu_online(cpu);
+
+	return is_cpu_allowed(p, cpu);
+}
+
+static __always_inline void requeue_preempt_task(struct task_struct *p, const int cpu)
+{
+	WRITE_ONCE(p->wake_cpu, cpu);
+	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
+}
+
+static __always_inline void kick_preempt_cpu(const int cpu)
+{
+	struct rq *rq = cpu_rq(cpu);
+
+	sched_update_tick_dependency(rq);
+	if (likely(raw_spin_trylock(&rq->lock))) {
+		if (cpu_online(cpu) || cpu == smp_processor_id())
+			resched_curr(rq);
+		raw_spin_unlock(&rq->lock);
+	} else {
+		wake_up_nohz_cpu(cpu);
+	}
+}
+
+static __always_inline void move_preempt_task(struct task_struct *p, const int cpu)
+{
+	if (!is_migration_disabled(p) && task_cpu(p) != cpu)
+		set_task_cpu(p, cpu);
+
+	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
+	WRITE_ONCE(p->wake_cpu, cpu);
+	kick_preempt_cpu(cpu);
+}
+
+static __always_inline int preempt_task_unique_cpu(struct task_struct *p)
+{
+	int cpu;
+
+	for_each_cpu(cpu, p->cpus_ptr)
+		if (is_cpu_allowed(p, cpu))
+			return cpu;
+
+	return nr_cpu_ids;
+}
+
 static __always_inline void migrate_preempt_task(struct task_struct *p, const int cpu)
 {
-	/* idle preempt success rate ~52.7% */
-	/* disable high risk code path: preempt list -> preempt list on other cpu
+	WARN_ON_ONCE(!task_on_rq_preempt(p));
+	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+
+	if (is_migration_disabled(p)) {
+		int dest_cpu = task_cpu(p);
+
+		if (WARN_ON_ONCE(dest_cpu >= nr_cpu_ids || !cpu_online(dest_cpu)))
+			dest_cpu = cpu;
+		if (dest_cpu == cpu)
+			requeue_preempt_task(p, cpu);
+		else
+			move_preempt_task(p, dest_cpu);
+		return;
+	}
+
+	if (1 == p->nr_cpus_allowed) {
+		int dest_cpu;
+
+		if (preempt_task_can_run_on(p, cpu)) {
+			requeue_preempt_task(p, cpu);
+			return;
+		}
+
+		dest_cpu = preempt_task_unique_cpu(p);
+		if (WARN_ON_ONCE(dest_cpu >= nr_cpu_ids)) {
+			requeue_preempt_task(p, cpu);
+			return;
+		}
+
+		if (dest_cpu == cpu)
+			requeue_preempt_task(p, cpu);
+		else
+			move_preempt_task(p, dest_cpu);
+		return;
+	}
+
 	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr);
 
-	if (rq)
-		preempt_on_rq(p, rq);
-	else
-	*/
-		activate_task(p, cpu_srq(cpu));
+	activate_task(p, cpu_srq(cpu));
+	if (rq) {
+		resched_curr(rq);
+		raw_spin_unlock(&rq->lock);
+	}
 }
 
 static __always_inline struct task_struct *pick_preempt_task(const int cpu, int pick_sched_prio)
@@ -4291,7 +4384,7 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 	llist_for_each_entry_safe(p, n, plist, pq_node) {
 		int sched_prio = task_sched_prio(p);
 
-		if (is_cpu_allowed(p, cpu) && sched_prio < pick_sched_prio) {
+		if (preempt_task_can_run_on(p, cpu) && sched_prio < pick_sched_prio) {
 			if (NULL != preempt)
 				migrate_preempt_task(preempt, cpu);
 			pick_sched_prio = sched_prio;
@@ -4603,6 +4696,7 @@ static void __sched notrace __schedule(int sched_mode)
 	expired = check_curr(rq->curr, rq);
 	next = pick_next_task(cpu, rq, expired);
 picked:
+	sched_update_tick_dependency(rq);
 	clear_tsk_need_resched(prev);
 	clear_preempt_need_resched();
 	rq->last_seen_need_resched_ns = 0;
