@@ -103,25 +103,28 @@ extern void wakeup_modified_task(struct task_struct *p);
  * run queue related inlined functions
  */
 static __always_inline
-struct llist_node *sched_llist_del(struct llist_node **curr, struct llist_node *target)
+bool sched_llist_del(struct llist_node **first, struct llist_node *target,
+		     struct llist_node **last)
 {
+	struct llist_node **curr = first;
 	struct llist_node *entry;
+	bool found = false;
 
 	while (*curr) {
 		entry = *curr;
 
 		if (entry == target) {
 			*curr = entry->next;
-			entry = container_of(curr, struct llist_node, next);
-			while (entry->next)
-				entry = entry->next;
-
-			return entry;
+			target->next = NULL;
+			found = true;
+		} else {
+			*last = entry;
+			curr = &entry->next;
 		}
-		curr = &entry->next;
 	}
-	WARN_ONCE(true, "sched/alt: llist_del() target should be in list\n");
-	return NULL;
+
+	WARN_ONCE(!found, "sched/alt: llist_del() target should be in list\n");
+	return found;
 }
 
 static __always_inline
@@ -147,14 +150,24 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 	}
 }
 
+/*
+ * p->__sched_prio is SRQ/GRQ membership metadata for pq_node reuse.
+ * -1 means the task is not linked in SRQ/GRQ; non-negative values identify
+ * the SRQ/GRQ bucket that owns pq_node.
+ */
 #define SRQ_DEQUEUE_TASK(srq, p, __modify_body__)					\
-{											\
+({											\
+	bool __found = true;								\
 	int idx = READ_ONCE(p->__sched_prio);						\
 	struct llist_head *head = &srq->_head[idx];					\
-	struct llist_node *last, *first = llist_del_all(head);				\
+	struct llist_node *last = NULL, *first = llist_del_all(head);			\
 											\
-	last = sched_llist_del(&first, &p->pq_node);					\
-	if (first) {									\
+	__found = sched_llist_del(&first, &p->pq_node, &last);				\
+	if (unlikely(!__found)) {							\
+		if (first)								\
+			sched_llist_merge(head, first, last);				\
+		__found = false;							\
+	} else if (first) {								\
 		sched_llist_merge(head, first, last);					\
 	} else if (llist_empty(head)) {							\
 		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
@@ -163,10 +176,13 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 		if (!llist_empty(head))							\
 			set_bit(idx, srq->bitmap);					\
 	}										\
-	__modify_body__									\
-	WRITE_ONCE(p->__sched_prio, -1);						\
-	atomic_dec(&srq->nr_queued);							\
-}
+	if (__found) {									\
+		__modify_body__								\
+		WRITE_ONCE(p->__sched_prio, -1);					\
+		atomic_dec(&srq->nr_queued);						\
+	}										\
+	__found;									\
+})
 
 #define SRQ_ENQUEUE_TASK(srq, p, __modify_body__)		\
 {								\
@@ -215,9 +231,12 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				if (task_on_rq_queued(p) && !p->on_cpu &&
 				    idx == READ_ONCE(p->__sched_prio)) {
 
-					SRQ_DEQUEUE_TASK(srq, p, {
-							 WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
-							 });
+					if (!SRQ_DEQUEUE_TASK(srq, p, {
+							WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+						})) {
+						raw_spin_unlock(lock);
+						continue;
+					}
 
 					raw_spin_unlock(lock);
 
