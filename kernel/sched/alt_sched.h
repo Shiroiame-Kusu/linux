@@ -86,6 +86,7 @@ extern void sched_release_group(struct task_group *tg);
 #define TASK_ON_RQ_QUEUED	1
 #define TASK_ON_RQ_MIGRATING	2
 #define TASK_ON_RQ_WAKING	11
+#define TASK_ON_RQ_PREEMPT	12
 
 static inline int task_on_rq_queued(struct task_struct *p)
 {
@@ -95,6 +96,11 @@ static inline int task_on_rq_queued(struct task_struct *p)
 static inline int task_on_rq_migrating(struct task_struct *p)
 {
 	return READ_ONCE(p->on_rq) == TASK_ON_RQ_MIGRATING;
+}
+
+static inline int task_on_rq_preempt(struct task_struct *p)
+{
+	return READ_ONCE(p->on_rq) == TASK_ON_RQ_PREEMPT;
 }
 
 /* Wake flags. The first three directly map to some SD flag value */
