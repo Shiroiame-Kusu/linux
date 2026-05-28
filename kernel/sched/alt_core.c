@@ -1312,6 +1312,8 @@ static void block_task(struct rq *rq, struct task_struct *p)
 	}
 
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
+	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+	WRITE_ONCE(p->__sched_prio, -1);
 
 	/*
 	 * The moment this write goes through, ttwu() can swoop in and migrate
@@ -1365,6 +1367,7 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	 * We should only call set_task_cpu() on a running task in pick_next_task().
 	 */
 	WARN_ON_ONCE(state != TASK_RUNNING && !task_on_rq_queued(p) &&
+		     !task_on_rq_preempt(p) &&
 		     TASK_ON_RQ_WAKING != p->on_rq);
 
 	/*
@@ -1742,8 +1745,22 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p)
 
 static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 {
-	int cpu = p->wake_cpu = cpu_of(rq);
+	int cpu = cpu_of(rq);
 
+	if (task_on_rq_preempt(p) && READ_ONCE(p->wake_cpu) == cpu) {
+		WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+		resched_curr(rq);
+		raw_spin_unlock(&rq->lock);
+		return;
+	}
+
+	WRITE_ONCE(p->wake_cpu, cpu);
+	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+	WRITE_ONCE(p->__sched_prio, -1);
+	if (task_cpu(p) != cpu)
+		set_task_cpu(p, cpu);
+	WRITE_ONCE(p->on_rq, TASK_ON_RQ_PREEMPT);
+	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
 	resched_curr(rq);
@@ -1753,9 +1770,6 @@ static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 
 static __always_inline void wakeup_preempt_on_rq(struct task_struct *p, struct rq *rq)
 {
-	WRITE_ONCE(p->on_rq, TASK_ON_RQ_WAKING);
-	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
-
 	WRITE_ONCE(p->__state, TASK_RUNNING);
 
 	preempt_on_rq(p, rq);
@@ -1766,9 +1780,6 @@ void wakeup_modified_task(struct task_struct *p)
 	struct rq *rq = wakeup_rq_trylock(p);
 
 	if (rq) {
-		WRITE_ONCE(p->on_rq, TASK_ON_RQ_WAKING);
-		ASSERT_EXCLUSIVE_WRITER(p->on_rq);
-
 		preempt_on_rq(p, rq);
 		return;
 	}
@@ -2820,6 +2831,8 @@ static inline void __sched_fork(u64 clone_flags, struct task_struct *p)
 	p->utime			= 0;
 	p->stime			= 0;
 	p->sched_time			= 0;
+	p->pq_node.next			= NULL;
+	p->__sched_prio			= -1;
 
 #ifdef CONFIG_SCHEDSTATS
 	/* Even if schedstat is disabled, there should not be garbage */
@@ -4223,6 +4236,9 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 		}
 	}
 	if (NULL != preempt) {
+		WARN_ON_ONCE(!task_on_rq_preempt(preempt));
+		WARN_ON_ONCE(READ_ONCE(preempt->__sched_prio) != -1);
+		WRITE_ONCE(preempt->__sched_prio, -1);
 		WRITE_ONCE(preempt->on_rq, TASK_ON_RQ_QUEUED);
 		ASSERT_EXCLUSIVE_WRITER(preempt->on_rq);
 
