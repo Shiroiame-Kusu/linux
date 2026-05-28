@@ -239,17 +239,28 @@ EXPORT_SYMBOL(__trace_set_current_state);
  *   try_to_wake_up(). This latter uses p->pi_lock to serialize against
  *   concurrent self.
  *
- * p->on_rq <- { 0, 1 = TASK_ON_RQ_QUEUED, 2 = TASK_ON_RQ_MIGRATING }:
+ * p->on_rq <- { 0, 1 = TASK_ON_RQ_QUEUED, 2 = TASK_ON_RQ_MIGRATING,
+ *	       11 = TASK_ON_RQ_WAKING, 12 = TASK_ON_RQ_PREEMPT }:
  *
  *   is set by activate_task() and cleared by deactivate_task()/block_task(),
  *   under rq->lock. Non-zero indicates the task is runnable, the special
  *   ON_RQ_MIGRATING state is used for migration without holding both
  *   rq->locks. It indicates task_cpu() is not stable, see task_rq_lock().
+ *   TASK_ON_RQ_WAKING and TASK_ON_RQ_PREEMPT are transient wakeup/preemption
+ *   states owned by cpu_rq(p->wake_cpu); PREEMPT means pq_node is linked in
+ *   that CPU's preempt_list.
  *
  *   Additionally it is possible to be ->on_rq but still be considered not
  *   runnable when p->se.sched_delayed is true. These tasks are on the runqueue
  *   but will be dequeued as soon as they get picked again. See the
  *   task_is_runnable() helper.
+ *
+ * p->__sched_prio <- { -1, [0, SCHED_LEVELS) }:
+ *
+ *   is SRQ/GRQ membership metadata for pq_node reuse. Non-negative values mean
+ *   pq_node is linked in SRQ/GRQ at that index. -1 means pq_node is detached or
+ *   owned elsewhere, including running, blocked, preempt_list, and freshly
+ *   picked transient states.
  *
  * p->on_cpu <- { 0, 1 }:
  *
