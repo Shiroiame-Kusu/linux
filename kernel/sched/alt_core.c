@@ -1299,6 +1299,66 @@ static inline void activate_task(struct task_struct *p, struct sched_run_queue *
 	//cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT * p->in_iowait);
 }
 
+static inline struct rq *wakeup_rq_trylock(const struct task_struct *p);
+
+static __always_inline bool wakeup_rq_kick(const struct task_struct *p)
+{
+	const int sched_prio = task_sched_prio(p);
+	const int preempt_idx = SCHED_LEVELS - 1 - sched_prio;
+	int cpu = task_cpu(p);
+	int idx;
+	cpumask_t *end_mask = per_cpu(cpu_affinity_end_mask, cpu);
+	const bool filter_test_cpu = cpumask_test_cpu(cpu, p->cpus_ptr);
+
+	if (1 == p->nr_cpus_allowed || is_migration_disabled(p)) {
+		cpu = is_migration_disabled(p) ? task_cpu(p) : cpumask_any(p->cpus_ptr);
+		if (cpu < nr_cpu_ids && sched_prio <= READ_ONCE(cpu_prio[cpu])) {
+			resched_cpu(cpu);
+			return true;
+		}
+
+		return false;
+	}
+
+	for_each_set_bit(idx, cpu_sched_prio_bitmap, preempt_idx) {
+		cpumask_t *mask;
+		const struct cpumask *prio_mask = cpu_sched_prio_mask + idx;
+
+		if (filter_test_cpu && cpumask_test_cpu(cpu, prio_mask)) {
+			resched_cpu(cpu);
+			return true;
+		}
+
+		for (mask = per_cpu(cpu_affinity_masks, cpu); mask < end_mask; mask++) {
+			int i;
+
+			for_each_cpu_and(i, p->cpus_ptr, mask)
+				if (cpumask_test_cpu(i, prio_mask)) {
+					resched_cpu(i);
+					return true;
+				}
+		}
+	}
+
+	return false;
+}
+
+static __always_inline void notify_queued_task(struct task_struct *p)
+{
+	struct rq *rq;
+
+	lockdep_assert_held(&p->pi_lock);
+
+	rq = wakeup_rq_trylock(p);
+	if (rq) {
+		resched_curr(rq);
+		raw_spin_unlock(&rq->lock);
+		return;
+	}
+
+	wakeup_rq_kick(p);
+}
+
 static void block_task(struct rq *rq, struct task_struct *p)
 {
 	sched_task_deactivate(p, rq);
@@ -1789,6 +1849,7 @@ void wakeup_modified_task(struct task_struct *p)
 				WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 				ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 			 });
+	notify_queued_task(p);
 }
 
 void sched_set_stop_task(int cpu, struct task_struct *stop)
@@ -2127,8 +2188,10 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 		}
 
 		wakeup_preempt_on_rq(p, rq);
-	} else
+	} else {
 		activate_task(p, srq);
+		notify_queued_task(p);
+	}
 }
 
 /*
@@ -3054,8 +3117,10 @@ void wake_up_new_task(struct task_struct *p)
 
 	if (rq)
 		wakeup_preempt_on_rq(p, rq);
-	else
+	else {
 		activate_task(p, cpu_srq(0));
+		notify_queued_task(p);
+	}
 
 	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
 }
