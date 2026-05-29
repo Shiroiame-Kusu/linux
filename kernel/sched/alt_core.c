@@ -307,6 +307,9 @@ EXPORT_SYMBOL(__trace_set_current_state);
 static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 {
 	lockdep_assert_held(&p->pi_lock);
+	rf->lock = NULL;
+	rf->queued = false;
+	rf->rq_lock = false;
 
 	for (;;) {
 		if (TASK_ON_RQ_WAKING == p->on_rq) {
@@ -315,7 +318,7 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 			raw_spin_lock(&rq->lock);
 			if (likely(TASK_ON_RQ_WAKING == p->on_rq && rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->queued = false;
+				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -328,7 +331,7 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->queued = false;
+				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -339,6 +342,7 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				raw_spin_lock(&rq->lock);
 				if (likely(p->on_cpu && rq == task_rq(p))) {
 					rf->lock = &rq->lock;
+					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -350,28 +354,55 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				    READ_ONCE(p->__sched_prio) == -1 &&
 				    rq == task_rq(p)) {
 					rf->lock = &rq->lock;
+					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
 			} else {
-				rf->lock = NULL;
-				return NULL;
+				int idx = READ_ONCE(p->__sched_prio);
+				struct sched_run_queue *srq = cpu_srq(0);
+				raw_spinlock_t *lock;
+				struct rq *rq;
+
+				if (idx < 0)
+					continue;
+
+				lock = &srq->_lock[idx];
+				raw_spin_lock(lock);
+				if (task_on_rq_queued(p) && !p->on_cpu &&
+				    idx == READ_ONCE(p->__sched_prio)) {
+					if (!SRQ_DEQUEUE_TASK(srq, p, { })) {
+						raw_spin_unlock(lock);
+						continue;
+					}
+
+					raw_spin_unlock(lock);
+					rq = task_rq(p);
+					raw_spin_lock(&rq->lock);
+
+					rf->lock = &rq->lock;
+					rf->queued = true;
+					rf->rq_lock = true;
+					return rq;
+				}
+				raw_spin_unlock(lock);
 			}
 		} else if (task_on_rq_migrating(p)) {
 			do {
 				cpu_relax();
 			} while (unlikely(task_on_rq_migrating(p)));
 		} else {
-			rf->lock = NULL;
 			return NULL;
 		}
 	}
 }
 
-static inline void __task_rq_unlock(struct rq_flags *rf)
+static inline void __task_rq_unlock(struct task_struct *p, struct rq_flags *rf)
 {
 	if (NULL != rf->lock)
 		raw_spin_unlock(rf->lock);
+	if (rf->queued)
+		wakeup_modified_task(p);
 }
 
 /*
@@ -383,6 +414,10 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 
 	for (;;) {
 		raw_spin_lock_irqsave(&p->pi_lock, rf->flags);
+		rf->lock = NULL;
+		rf->queued = false;
+		rf->rq_lock = false;
+
 		if (task_on_rq_preempt(p)) {
 			int wake_cpu = READ_ONCE(p->wake_cpu);
 
@@ -391,9 +426,41 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 			if (likely(task_on_rq_preempt(p) &&
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
+				rf->lock = &rq->lock;
+				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
+			raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+			continue;
+		}
+
+		if (task_on_rq_queued(p) && !p->on_cpu && READ_ONCE(p->__sched_prio) != -1) {
+			int idx = READ_ONCE(p->__sched_prio);
+			struct sched_run_queue *srq = cpu_srq(0);
+			raw_spinlock_t *lock = &srq->_lock[idx];
+
+			raw_spin_lock(lock);
+			if (task_on_rq_queued(p) && !p->on_cpu &&
+			    idx == READ_ONCE(p->__sched_prio)) {
+				if (!SRQ_DEQUEUE_TASK(srq, p, {
+						WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+					})) {
+					raw_spin_unlock(lock);
+					raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+					continue;
+				}
+
+				raw_spin_unlock(lock);
+				rq = task_rq(p);
+				raw_spin_lock(&rq->lock);
+
+				rf->lock = &rq->lock;
+				rf->queued = true;
+				rf->rq_lock = true;
+				return rq;
+			}
+			raw_spin_unlock(lock);
 			raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
 			continue;
 		}
@@ -419,6 +486,8 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		 */
 		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p) &&
 			   !task_on_rq_preempt(p))) {
+			rf->lock = &rq->lock;
+			rf->rq_lock = true;
 			return rq;
 		}
 		raw_spin_unlock(&rq->lock);
@@ -1122,7 +1191,7 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 				queued = 1;
 			ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
 		}
-		__task_rq_unlock(&rf);
+		__task_rq_unlock(p, &rf);
 		raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
 
 		/*
@@ -1595,10 +1664,25 @@ void set_cpus_allowed_force(struct task_struct *p, const struct cpumask *new_mas
 		struct rcu_head rcu;
 	};
 
+	struct rq_flags rf;
+	struct rq *rq;
+
+	lockdep_assert_held(&p->pi_lock);
+	rq = __task_modify_lock(p, &rf);
+
 	do_set_cpus_allowed(p, &ac);
 
-	if (is_migration_disabled(p) && !cpumask_test_cpu(task_cpu(p), &p->cpus_mask))
-		__migrate_force_enable(p, task_rq(p));
+	if (is_migration_disabled(p) && !cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
+		if (!rf.rq_lock) {
+			rq = task_rq(p);
+			raw_spin_lock(&rq->lock);
+		}
+		__migrate_force_enable(p, rq);
+		if (!rf.rq_lock)
+			raw_spin_unlock(&rq->lock);
+	}
+
+	__task_modify_unlock(p, &rf);
 
 	/*
 	 * Because this is called with p->pi_lock held, it is not possible
@@ -1841,14 +1925,13 @@ static inline struct rq *wakeup_rq_trylock(const struct task_struct *p)
 	return __wakeup_rq_trylock(p, sched_prio, p->cpus_ptr);
 }
 
-static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
+static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct rq *rq)
 {
 	int cpu = cpu_of(rq);
 
 	if (task_on_rq_preempt(p) && READ_ONCE(p->wake_cpu) == cpu) {
 		WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
 		resched_curr(rq);
-		raw_spin_unlock(&rq->lock);
 		return;
 	}
 
@@ -1862,7 +1945,11 @@ static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
 	resched_curr(rq);
+}
 
+static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
+{
+	preempt_on_rq_locked(p, rq);
 	raw_spin_unlock(&rq->lock);
 }
 
@@ -1948,8 +2035,15 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 {
 	/* Can the task run on the task's current CPU? If so, we're done */
 	if (!cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
-		if (is_migration_disabled(p))
+		if (is_migration_disabled(p)) {
+			if (!rf->rq_lock) {
+				rq = task_rq(p);
+				raw_spin_lock(&rq->lock);
+			}
 			__migrate_force_enable(p, rq);
+			if (!rf->rq_lock)
+				raw_spin_unlock(&rq->lock);
+		}
 
 		if (task_on_cpu(p)) {
 			/* Need help from cpu stop thread: drop lock and wait. */
@@ -1972,7 +2066,7 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 {
 	const struct cpumask *cpu_allowed_mask = task_cpu_possible_mask(p);
 	bool kthread = p->flags & PF_KTHREAD;
-	int ret = 0;
+	int cpu, ret = 0;
 
 	/*
 	 * Kernel threads are allowed on online && !active CPUs,
@@ -2003,6 +2097,24 @@ static int __set_cpus_allowed_ptr_locked(struct task_struct *p,
 		goto out;
 	}
 
+	for_each_cpu(cpu, ctx->new_mask) {
+		if (is_migration_disabled(p)) {
+			if (cpu_online(cpu))
+				goto valid_mask;
+		} else if (!kthread) {
+			if (cpu_active(cpu) && task_cpu_possible(cpu, p))
+				goto valid_mask;
+		} else if (kthread_is_per_cpu(p)) {
+			if (cpu_online(cpu))
+				goto valid_mask;
+		} else if (!cpu_dying(cpu) && cpu_online(cpu)) {
+			goto valid_mask;
+		}
+	}
+	ret = -EINVAL;
+	goto out;
+
+valid_mask:
 	if (cpumask_equal(&p->cpus_mask, ctx->new_mask)) {
 		if (ctx->flags & SCA_USER)
 			swap(p->user_cpus_ptr, ctx->user_mask);
@@ -2036,15 +2148,9 @@ int __set_cpus_allowed_ptr(struct task_struct *p,
 
 	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
 	rq = __task_modify_lock(p, &rf);
-	/*
-	 * Masking should be skipped if SCA_USER or any of the SCA_MIGRATE_*
-	 * flags are set.
-	 */
-	if (p->user_cpus_ptr &&
-	    !(ctx->flags & SCA_USER) &&
+	if (p->user_cpus_ptr && !(ctx->flags & SCA_USER) &&
 	    cpumask_and(rq->scratch_mask, ctx->new_mask, p->user_cpus_ptr))
 		ctx->new_mask = rq->scratch_mask;
-
 
 	return __set_cpus_allowed_ptr_locked(p, ctx, rq, &rf);
 }
@@ -2328,7 +2434,15 @@ void sched_ttwu_pending(void *arg)
 		if (WARN_ON_ONCE(task_cpu(p) != cpu_of(rq)))
 			set_task_cpu(p, cpu_of(rq));
 
-		ttwu_do_activate(p, p->sched_remote_wakeup ? WF_MIGRATED : 0);
+		if (p->sched_contributes_to_load)
+			atomic_dec(&cpu_srq(0)->nr_uninterruptible);
+		if (p->in_iowait) {
+			delayacct_blkio_end(p);
+			atomic_dec(&cpu_srq(0)->nr_iowait);
+		}
+		WRITE_ONCE(p->__state, TASK_RUNNING);
+		trace_sched_wakeup(p);
+		preempt_on_rq_locked(p, rq);
 	}
 
 	/*
@@ -2461,7 +2575,12 @@ bool cpus_equal_capacity(int this_cpu, int that_cpu)
 
 static inline void ttwu_queue(struct task_struct *p, int wake_flags)
 {
-	if (ttwu_queue_wakelist(p, 0, wake_flags))
+	int cpu = task_cpu(p);
+
+	if (!is_cpu_allowed(p, cpu))
+		cpu = queued_task_tick_cpu(p);
+
+	if (cpu < nr_cpu_ids && ttwu_queue_wakelist(p, cpu, wake_flags))
 		return;
 
 	ttwu_do_activate(p, wake_flags);
@@ -2858,7 +2977,7 @@ int task_call_func(struct task_struct *p, task_call_f func, void *arg)
 	ret = func(p, arg);
 
 	if (rq)
-		__task_rq_unlock(&rf);
+		__task_rq_unlock(p, &rf);
 
 	raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
 	return ret;
@@ -4362,8 +4481,8 @@ static __always_inline void move_preempt_task(struct task_struct *p, const int c
 	if (!is_migration_disabled(p) && task_cpu(p) != cpu)
 		set_task_cpu(p, cpu);
 
-	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 	WRITE_ONCE(p->wake_cpu, cpu);
+	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 	kick_preempt_cpu(cpu);
 }
 
@@ -4516,7 +4635,7 @@ static __always_inline void wakeup_srq_task(const int cpu)
 			sched_llist_merge(head, first, last);					\
 		} else if (llist_empty(head)) {							\
 			clear_bit(idx, srq->bitmap);						\
-			smp_rmb();								\
+			smp_mb__after_atomic();							\
 			if (!llist_empty(head))							\
 				set_bit(idx, srq->bitmap);					\
 		}										\
@@ -5216,19 +5335,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	if (prio == p->prio)
 		goto out_unlock;
 
-	/*
-	 * Idle task boosting is a no-no in general. There is one
-	 * exception, when PREEMPT_RT and NOHZ is active:
-	 *
-	 * The idle task calls get_next_timer_interrupt() and holds
-	 * the timer wheel base->lock on the CPU and another CPU wants
-	 * to access the timer (probably to cancel it). We can safely
-	 * ignore the boosting request, as the idle CPU runs this code
-	 * with interrupts disabled and will complete the lock
-	 * protected section without being interrupted. So there is no
-	 * real need to boost.
-	 */
-	if (unlikely(p == rq->idle)) {
+	if (rf.rq_lock && unlikely(p == rq->idle)) {
 		WARN_ON(p != rq->curr);
 		WARN_ON(p->pi_blocked_on);
 		goto out_unlock;
@@ -5243,7 +5350,8 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 out_unlock:
 	/* Caller holds task_struct::pi_lock, IRQs are still disabled */
 
-	__balance_callbacks(rq);
+	if (rf.rq_lock)
+		__balance_callbacks(rq);
 	__task_modify_unlock(p, &rf);
 }
 #endif /* CONFIG_RT_MUTEXES */
