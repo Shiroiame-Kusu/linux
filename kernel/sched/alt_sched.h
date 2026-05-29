@@ -389,6 +389,7 @@ struct rq_flags {
 	unsigned long	flags;
 	raw_spinlock_t	*lock;
 	bool		queued;
+	bool		rq_lock;
 };
 
 static inline void
@@ -494,6 +495,12 @@ struct sched_run_queue {
 };
 
 extern struct sched_run_queue grq;
+DECLARE_PER_CPU_SHARED_ALIGNED(struct llist_head, preempt_list);
+
+static inline bool is_preempt_list_empty(const int cpu)
+{
+	return llist_empty(per_cpu_ptr(&preempt_list, cpu));
+}
 
 /*
  * schedule run queue functions
@@ -520,7 +527,10 @@ static inline unsigned int nr_uninterruptible(void)
 
 static inline bool idle_rq(struct rq *rq)
 {
-	return rq->curr == rq->idle && !srq_nr_queued(cpu_of(rq)) && !rq->ttwu_pending;
+	int cpu = cpu_of(rq);
+
+	return rq->curr == rq->idle && !srq_nr_queued(cpu) &&
+	       is_preempt_list_empty(cpu) && !rq->ttwu_pending;
 }
 
 /**

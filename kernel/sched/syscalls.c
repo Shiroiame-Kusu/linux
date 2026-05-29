@@ -541,14 +541,6 @@ int __sched_setscheduler(struct task_struct *p,
 			const struct sched_attr *attr,
 			bool user, bool pi)
 {
-#ifdef CONFIG_SCHED_ALT
-	const struct sched_attr dl_squash_attr = {
-		.size		= sizeof(struct sched_attr),
-		.sched_policy	= SCHED_FIFO,
-		.sched_nice	= 0,
-		.sched_priority = 99,
-	};
-#endif /* CONFIG_SCHED_ALT */
 	int oldpolicy = -1, policy = attr->sched_policy;
 	int retval, oldprio, newprio;
 #ifndef CONFIG_SCHED_ALT
@@ -564,13 +556,8 @@ int __sched_setscheduler(struct task_struct *p,
 	/* The pi code expects interrupts enabled */
 	BUG_ON(pi && in_interrupt());
 #ifdef CONFIG_SCHED_ALT
-	/*
-	 * Alt schedule FW supports SCHED_DEADLINE by squash it as prio 0 SCHED_FIFO
-	 */
-	if (unlikely(SCHED_DEADLINE == policy)) {
-		attr = &dl_squash_attr;
-		policy = attr->sched_policy;
-	}
+	if (unlikely(SCHED_DEADLINE == policy))
+		return -EOPNOTSUPP;
 #endif /* CONFIG_SCHED_ALT */
 recheck:
 	/* Double check policy once rq lock held: */
@@ -802,10 +789,11 @@ change:
 
 	/* Avoid rq from going away on us: */
 	preempt_disable();
-	head = splice_balance_callbacks(rq);
 #ifdef CONFIG_SCHED_ALT
+	head = rf.rq_lock ? splice_balance_callbacks(rq) : NULL;
 	task_access_unlock(p, &rf);
 #else
+	head = splice_balance_callbacks(rq);
 	task_rq_unlock(rq, p, &rf);
 #endif /* !CONFIG_SCHED_ALT */
 
