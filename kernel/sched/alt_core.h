@@ -13,14 +13,6 @@ extern void alt_sched_debug(void);
 static inline void alt_sched_debug(void) {}
 #endif
 
-/* preempt list function */
-DECLARE_PER_CPU_SHARED_ALIGNED(struct llist_head, preempt_list);
-
-static inline bool is_preempt_list_empty(const int cpu)
-{
-	return llist_empty(per_cpu_ptr(&preempt_list, cpu));
-}
-
 /*
  * Task related inlined functions
  */
@@ -172,7 +164,7 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
 	} else if (llist_empty(head)) {							\
 		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
 		clear_bit(idx, srq->bitmap);						\
-		smp_rmb();								\
+		smp_mb__after_atomic();							\
 		if (!llist_empty(head))							\
 			set_bit(idx, srq->bitmap);					\
 	}										\
@@ -200,6 +192,10 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
  */
 static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_flags *rf)
 {
+	rf->lock = NULL;
+	rf->queued = false;
+	rf->rq_lock = false;
+
 	for (;;) {
 		if (TASK_ON_RQ_WAKING == p->on_rq) {
 			struct rq *rq = cpu_rq(p->wake_cpu);
@@ -207,7 +203,7 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 			raw_spin_lock(&rq->lock);
 			if (likely(TASK_ON_RQ_WAKING == p->on_rq && rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->queued = false;
+				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -220,7 +216,7 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->queued = false;
+				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -232,7 +228,7 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				raw_spin_lock(&rq->lock);
 				if (likely(task_on_rq_queued(p) && p->on_cpu && rq == task_rq(p))) {
 					rf->lock = &rq->lock;
-					rf->queued = false;
+					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -258,6 +254,7 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 
 					rf->lock = &rq->lock;
 					rf->queued = true;
+					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(lock);
@@ -269,7 +266,7 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				    READ_ONCE(p->__sched_prio) == -1 &&
 				    rq == task_rq(p)) {
 					rf->lock = &rq->lock;
-					rf->queued = false;
+					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -279,9 +276,15 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				cpu_relax();
 			} while (unlikely(task_on_rq_migrating(p)));
 		} else {
-			rf->lock = NULL;
-			rf->queued = false;
-			return task_rq(p);
+			struct rq *rq = task_rq(p);
+
+			raw_spin_lock(&rq->lock);
+			if (likely(rq == task_rq(p))) {
+				rf->lock = &rq->lock;
+				rf->rq_lock = true;
+				return rq;
+			}
+			raw_spin_unlock(&rq->lock);
 		}
 	}
 }
@@ -317,7 +320,10 @@ extern struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf);
 static inline void
 task_rq_unlock(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
 {
-	raw_spin_unlock(&rq->lock);
+	if (rf->lock)
+		raw_spin_unlock(rf->lock);
+	if (rf->queued)
+		wakeup_modified_task(p);
 	raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
 }
 
