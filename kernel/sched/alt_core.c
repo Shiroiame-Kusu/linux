@@ -3262,6 +3262,8 @@ static inline void prepare_task(struct task_struct *next)
 	WRITE_ONCE(next->on_cpu, 1);
 }
 
+static __always_inline void kick_preempt_cpu(const int cpu);
+
 static inline void finish_task(struct task_struct *prev, struct rq *rq)
 {
 	/*
@@ -3294,13 +3296,21 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 		} else {
 			struct rq *trq;
 			struct sched_run_queue *srq = rq_srq(rq);
+			int kick_cpu, tick_cpu;
+
+			trq = __wakeup_rq_trylock(prev, IDLE_TASK_SCHED_PRIO - 1, prev->cpus_ptr);
+			kick_cpu = trq ? nr_cpu_ids : wakeup_rq_kick_cpu(prev, cpu);
+			tick_cpu = kick_cpu < nr_cpu_ids ? nr_cpu_ids : queued_task_tick_cpu(prev);
 
 			SRQ_ENQUEUE_TASK(srq, prev, );
 
-			trq = __wakeup_rq_trylock(prev, IDLE_TASK_SCHED_PRIO - 1, prev->cpus_ptr);
 			if (trq) {
 				resched_curr(trq);
 				raw_spin_unlock(&trq->lock);
+			} else {
+				if (kick_cpu < nr_cpu_ids)
+					kick_preempt_cpu(kick_cpu);
+				update_queued_task_tick_dependency(tick_cpu);
 			}
 		}
 	}
@@ -4476,11 +4486,9 @@ static __always_inline void wakeup_srq_task(const int cpu)
 	/* At this point, p is most likely per-cpu task */
 	for_each_cpu_and (i, p->cpus_ptr, cpu_active_mask) {
 		if (idx < READ_ONCE(cpu_prio[i])) {
-			struct rq *rq = cpu_rq(i);
-			if (likely(raw_spin_trylock(&rq->lock))) {
-				resched_curr(rq);
-				raw_spin_unlock(&rq->lock);
-			}
+			if (i == cpu)
+				continue;
+			kick_preempt_cpu(i);
 		}
 	}
 }
