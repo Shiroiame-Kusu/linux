@@ -1358,6 +1358,7 @@ static inline void activate_task(struct task_struct *p, struct sched_run_queue *
 
 static inline bool is_cpu_allowed(struct task_struct *p, int cpu);
 static inline struct rq *wakeup_rq_trylock(const struct task_struct *p);
+static __always_inline void kick_preempt_cpu(const int cpu);
 
 static __always_inline int wakeup_rq_kick_cpu(struct task_struct *p,
 					      const int skip_cpu)
@@ -1917,9 +1918,16 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
 {
 	int cpu = cpu_of(rq);
 
-	if (task_on_rq_preempt(p) && READ_ONCE(p->wake_cpu) == cpu) {
+	if (task_on_rq_preempt(p)) {
+		int wake_cpu = READ_ONCE(p->wake_cpu);
+
 		WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
-		resched_curr(rq);
+		if (WARN_ON_ONCE(wake_cpu >= nr_cpu_ids))
+			return;
+		if (wake_cpu == cpu)
+			resched_curr(rq);
+		else
+			kick_preempt_cpu(wake_cpu);
 		return;
 	}
 
