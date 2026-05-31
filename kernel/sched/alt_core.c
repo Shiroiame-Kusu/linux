@@ -362,7 +362,6 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				int idx = READ_ONCE(p->__sched_prio);
 				struct sched_run_queue *srq = cpu_srq(0);
 				raw_spinlock_t *lock;
-				struct rq *rq;
 
 				if (idx < 0)
 					continue;
@@ -371,19 +370,8 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				raw_spin_lock(lock);
 				if (task_on_rq_queued(p) && !p->on_cpu &&
 				    idx == READ_ONCE(p->__sched_prio)) {
-					if (!SRQ_DEQUEUE_TASK(srq, p, { })) {
-						raw_spin_unlock(lock);
-						continue;
-					}
-
-					raw_spin_unlock(lock);
-					rq = task_rq(p);
-					raw_spin_lock(&rq->lock);
-
-					rf->lock = &rq->lock;
-					rf->queued = true;
-					rf->rq_lock = true;
-					return rq;
+					rf->lock = lock;
+					return task_rq(p);
 				}
 				raw_spin_unlock(lock);
 			}
@@ -1177,10 +1165,10 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 		 * just go back and repeat.
 		 */
 		raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
-		__task_rq_lock(p, &rf);
+		__task_modify_lock(p, &rf);
 		trace_sched_wait_task(p);
 		running = task_on_cpu(p);
-		queued = task_on_rq_queued(p) || task_on_rq_preempt(p);
+		queued = rf.queued || task_on_rq_queued(p) || task_on_rq_preempt(p);
 		ncsw = 0;
 		if ((match = __task_state_match(p, match_state))) {
 			/*
@@ -1191,7 +1179,7 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 				queued = 1;
 			ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
 		}
-		__task_rq_unlock(p, &rf);
+		__task_modify_unlock(p, &rf);
 		raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
 
 		/*
@@ -2968,7 +2956,7 @@ int task_call_func(struct task_struct *p, task_call_f func, void *arg)
 	 * At this point the task is pinned; either:
 	 *  - blocked and we're holding off wakeups      (pi->lock)
 	 *  - woken, and we're holding off enqueue       (rq->lock)
-	 *  - queued, and we're holding off schedule     (rq->lock)
+	 *  - queued, and we're holding off schedule     (rq->lock or SRQ lock)
 	 *  - running, and we're holding off de-schedule (rq->lock)
 	 *
 	 * The called function (@func) can use: task_curr(), p->on_rq and
