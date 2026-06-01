@@ -1165,10 +1165,10 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 		 * just go back and repeat.
 		 */
 		raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
-		__task_modify_lock(p, &rf);
+		__task_rq_lock(p, &rf);
 		trace_sched_wait_task(p);
 		running = task_on_cpu(p);
-		queued = rf.queued || task_on_rq_queued(p) || task_on_rq_preempt(p);
+		queued = task_on_rq_queued(p) || task_on_rq_preempt(p);
 		ncsw = 0;
 		if ((match = __task_state_match(p, match_state))) {
 			/*
@@ -1179,7 +1179,7 @@ unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state
 				queued = 1;
 			ncsw = p->nvcsw | LONG_MIN; /* sets MSB */
 		}
-		__task_modify_unlock(p, &rf);
+		__task_rq_unlock(p, &rf);
 		raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
 
 		/*
