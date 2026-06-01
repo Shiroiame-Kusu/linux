@@ -688,7 +688,7 @@ static inline void sched_update_tick_dependency(struct rq *rq) { }
 
 bool sched_task_on_rq(struct task_struct *p)
 {
-	return task_on_rq_queued(p);
+	return task_on_rq_queued(p) || task_on_rq_preempt(p);
 }
 
 unsigned long get_wchan(struct task_struct *p)
@@ -2029,6 +2029,8 @@ static int dummy_cpu_stop(void *data)
 
 static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flags *rf)
 {
+	int preempt_cpu = nr_cpu_ids;
+
 	/* Can the task run on the task's current CPU? If so, we're done */
 	if (!cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
 		if (is_migration_disabled(p)) {
@@ -2048,10 +2050,14 @@ static int affine_move_task(struct rq *rq, struct task_struct *p, struct rq_flag
 			stop_one_cpu(cpu_of(rq), dummy_cpu_stop, p);
 			return 0;
 		}
+		if (task_on_rq_preempt(p))
+			preempt_cpu = READ_ONCE(p->wake_cpu);
 		/* Nothing we should do for task_on_rq_queued(p) */
 	}
 	__task_modify_unlock(p, rf);
 	raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+	if (preempt_cpu < nr_cpu_ids)
+		kick_preempt_cpu(preempt_cpu);
 	return 0;
 }
 
@@ -4586,26 +4592,55 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 static __always_inline void wakeup_srq_task(const int cpu)
 {
 	struct sched_run_queue *srq = cpu_srq(cpu);
-	int idx = find_first_bit(srq->bitmap, SCHED_QUEUE_BITS);
+	int idx, kick_cpu = nr_cpu_ids;
 
-	if (unlikely(SCHED_QUEUE_BITS == idx))
-		return;
+	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
+		struct llist_head *head = &srq->_head[idx];
+		struct llist_node *entry, *first, *last = NULL;
+		raw_spinlock_t *lock = &srq->_lock[idx];
 
-	struct llist_node *entry= srq->_head[idx].first;
-	if (unlikely(NULL == entry))
-		return;
-
-	struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
-	int i;
-
-	/* At this point, p is most likely per-cpu task */
-	for_each_cpu_and (i, p->cpus_ptr, cpu_active_mask) {
-		if (idx < READ_ONCE(cpu_prio[i])) {
-			if (i == cpu)
-				continue;
-			kick_preempt_cpu(i);
+		raw_spin_lock(lock);
+		first = llist_del_all(head);
+		if (unlikely(NULL == first)) {
+			if (llist_empty(head)) {
+				clear_bit(idx, srq->bitmap);
+				smp_mb__after_atomic();
+				if (!llist_empty(head))
+					set_bit(idx, srq->bitmap);
+			}
+			raw_spin_unlock(lock);
+			continue;
 		}
+
+		llist_for_each(entry, first) {
+			struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
+			int i;
+
+			last = entry;
+			if (kick_cpu < nr_cpu_ids)
+				continue;
+			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
+				continue;
+
+			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
+				if (i == cpu || !is_cpu_allowed(p, i))
+					continue;
+				if (idx < READ_ONCE(cpu_prio[i])) {
+					kick_cpu = i;
+					break;
+				}
+			}
+		}
+
+		sched_llist_merge(head, first, last);
+		raw_spin_unlock(lock);
+
+		if (kick_cpu < nr_cpu_ids)
+			break;
 	}
+
+	if (kick_cpu < nr_cpu_ids)
+		kick_preempt_cpu(kick_cpu);
 }
 
 #define PQ_PICK_TASK										\
