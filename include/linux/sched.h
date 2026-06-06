@@ -2486,12 +2486,10 @@ static inline void __migrate_enable(void)
 	 */
 	guard(preempt)();
 #ifdef CONFIG_SCHED_ALT
-	/*
-	 * Assumption: current should be running on allowed cpu
-	 */
-	WARN_ON_ONCE(!cpumask_test_cpu(smp_processor_id(), &p->cpus_mask));
 	if (p->cpus_ptr != &p->cpus_mask)
 		__do_set_cpus_ptr(p, &p->cpus_mask);
+	if (unlikely(!cpumask_test_cpu(smp_processor_id(), &p->cpus_mask)))
+		___migrate_enable();
 #else
 	if (unlikely(p->cpus_ptr != &p->cpus_mask))
 		___migrate_enable();

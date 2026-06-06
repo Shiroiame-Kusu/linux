@@ -1551,10 +1551,44 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	__set_task_cpu(p, new_cpu);
 }
 
+static DEFINE_PER_CPU(struct cpu_stop_work, migrate_enable_stop_work);
+static DEFINE_PER_CPU(struct balance_arg, migrate_enable_stop_arg);
+
+static int migrate_enable_cpu_stop(void *data)
+{
+	struct balance_arg *arg = data;
+	unsigned long flags;
+
+	local_irq_save(flags);
+	arg->active = 0;
+	local_irq_restore(flags);
+
+	return 0;
+}
+
 void ___migrate_enable(void)
 {
 	struct task_struct *p = current;
-	__do_set_cpus_ptr(p, &p->cpus_mask);
+	struct balance_arg *arg;
+	unsigned long flags;
+	int cpu = smp_processor_id();
+
+	WARN_ON_ONCE(p->cpus_ptr != &p->cpus_mask);
+	if (likely(cpumask_test_cpu(cpu, &p->cpus_mask)))
+		return;
+
+	local_irq_save(flags);
+	set_need_resched_current();
+	arg = this_cpu_ptr(&migrate_enable_stop_arg);
+	if (!arg->active) {
+		arg->active = 1;
+		local_irq_restore(flags);
+		if (!stop_one_cpu_nowait(cpu, migrate_enable_cpu_stop, arg,
+					 this_cpu_ptr(&migrate_enable_stop_work)))
+			arg->active = 0;
+		return;
+	}
+	local_irq_restore(flags);
 }
 EXPORT_SYMBOL_GPL(___migrate_enable);
 

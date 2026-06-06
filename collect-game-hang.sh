@@ -1,13 +1,29 @@
 #!/usr/bin/env bash
 set -u
 
-tag="${1:-game-hang}"
+arg1="${1:-game-hang}"
+extra_pattern="${2:-}"
+if [[ "$arg1" =~ ^[0-9]+$ ]]; then
+	tag="pid-${arg1}"
+	target_pid="$arg1"
+else
+	tag="$arg1"
+	target_pid=""
+fi
 ts="$(date +%Y%m%d-%H%M%S)"
 out="$HOME/${tag}-${ts}"
+default_pattern='steam|steamwebhelper|reaper|wine|wineserver|winedevice|services\.exe|explorer\.exe|proton|pressure-vessel|gamescope|umu|GameOverlay|idea|jetbrains|fsnotifier|dbus-monitor|kwin_wayland|Xwayland'
 
 mkdir -p "$out/proc" "$out/sys"
 
 echo "[+] collecting into $out"
+echo "[+] default process match pattern: $default_pattern"
+if [ -n "$target_pid" ]; then
+	echo "[+] target pid: $target_pid"
+fi
+if [ -n "$extra_pattern" ]; then
+	echo "[+] extra process match pattern: $extra_pattern"
+fi
 
 {
 	echo "date: $(date -Is)"
@@ -20,6 +36,11 @@ echo "[+] collecting into $out"
 	echo
 	echo "kernel release:"
 	uname -r
+	echo
+	echo "collector tag: $tag"
+	echo "target pid: $target_pid"
+	echo "default process match pattern: $default_pattern"
+	echo "extra process match pattern: $extra_pattern"
 } > "$out/system.txt" 2>&1
 
 ps -eo pid,ppid,pgid,sid,stat,psr,ni,pri,rtprio,pcpu,pmem,wchan:40,comm,args --sort=-pcpu \
@@ -31,13 +52,45 @@ ps -eLo pid,tid,ppid,pgid,sid,stat,psr,ni,pri,rtprio,pcpu,pmem,wchan:40,comm,arg
 pstree -apT > "$out/pstree.txt" 2>&1 || true
 pstree -aps $$ > "$out/pstree-self.txt" 2>&1 || true
 
-pgrep -a -f 'steam|steamwebhelper|reaper|wine|wineserver|winedevice|services\.exe|explorer\.exe|proton|pressure-vessel|gamescope|umu|GameOverlay' \
-	> "$out/matching-processes.txt" 2>&1 || true
+{
+	pgrep -a -f -- "$default_pattern" 2>/dev/null || true
+	if [ -n "$extra_pattern" ]; then
+		pgrep -a -f -- "$extra_pattern" 2>/dev/null || true
+	fi
+	if [ -n "$target_pid" ] && [ -d "/proc/$target_pid" ]; then
+		ps -p "$target_pid" -o pid=,args= 2>/dev/null || true
+		pgrep -a -P "$target_pid" 2>/dev/null || true
+	fi
+} > "$out/matching-processes.txt" 2>&1 || true
 
 mapfile -t pids < <(
 	{
-		pgrep -f 'steam|steamwebhelper|reaper|wine|wineserver|winedevice|services\.exe|explorer\.exe|proton|pressure-vessel|gamescope|umu|GameOverlay' 2>/dev/null || true
-		ps -eo pid=,comm= | awk '$2 ~ /(steam|wine|wineserver|reaper|gamescope)/ {print $1}' 2>/dev/null || true
+		pgrep -f -- "$default_pattern" 2>/dev/null || true
+		if [ -n "$extra_pattern" ]; then
+			pgrep -f -- "$extra_pattern" 2>/dev/null || true
+		fi
+		if [ -n "$target_pid" ] && [ -d "/proc/$target_pid" ]; then
+			echo "$target_pid"
+			pgrep -P "$target_pid" 2>/dev/null || true
+			awk -v root="$target_pid" '
+				NR == 1 { next }
+				{ ppid[$1] = $2 }
+				END {
+					for (pid in ppid) {
+						delete seen
+						cur = pid
+						while ((cur in ppid) && !seen[cur]++) {
+							if (ppid[cur] == root) {
+								print pid
+								break
+							}
+							cur = ppid[cur]
+						}
+					}
+				}
+			' "$out/ps-processes.txt" 2>/dev/null || true
+		fi
+		awk 'NR > 1 && ($6 ~ /^D/ || $6 ~ /^Z/) {print $1}' "$out/ps-threads.txt" 2>/dev/null || true
 	} | sort -n | uniq
 )
 
