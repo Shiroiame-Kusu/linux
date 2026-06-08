@@ -43,9 +43,8 @@ struct affinity_context {
 #define scx_switched_all()	false
 
 #define SCA_CHECK		0x01
-/* SCA_MIGRATE_DISABLE & SCA_MIGRATE_ENABLE is not supported */
-//#define SCA_MIGRATE_DISABLE	0x02
-//#define SCA_MIGRATE_ENABLE	0x04
+/* SCA_MIGRATE_DISABLE is not supported */
+#define SCA_MIGRATE_ENABLE	0x04
 #define SCA_USER		0x08
 
 extern int __set_cpus_allowed_ptr(struct task_struct *p, struct affinity_context *ctx);
