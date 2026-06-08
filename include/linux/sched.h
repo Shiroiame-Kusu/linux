@@ -941,9 +941,7 @@ struct task_struct {
 	const cpumask_t			*cpus_ptr;
 	cpumask_t			*user_cpus_ptr;
 	cpumask_t			cpus_mask;
-#ifndef CONFIG_SCHED_ALT
 	void				*migration_pending;
-#endif
 	unsigned short			migration_disabled;
 #ifndef CONFIG_SCHED_ALT
 	unsigned short			migration_flags;
@@ -2424,6 +2422,9 @@ static __always_inline int task_mm_cid(struct task_struct *t)
 #ifndef COMPILE_OFFSETS
 
 extern void ___migrate_enable(void);
+#ifdef CONFIG_SCHED_ALT
+extern void sched_migrate_enable_finish(struct task_struct *p);
+#endif
 
 struct rq;
 DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
@@ -2485,15 +2486,8 @@ static inline void __migrate_enable(void)
 	 * __set_cpus_allowed_ptr(SCA_MIGRATE_ENABLE) doesn't schedule().
 	 */
 	guard(preempt)();
-#ifdef CONFIG_SCHED_ALT
-	if (p->cpus_ptr != &p->cpus_mask)
-		__do_set_cpus_ptr(p, &p->cpus_mask);
-	if (unlikely(!cpumask_test_cpu(smp_processor_id(), &p->cpus_mask)))
-		___migrate_enable();
-#else
 	if (unlikely(p->cpus_ptr != &p->cpus_mask))
 		___migrate_enable();
-#endif
 	/*
 	 * Mustn't clear migration_disabled() until cpus_ptr points back at the
 	 * regular cpus_mask, otherwise things that race (eg.
@@ -2501,6 +2495,9 @@ static inline void __migrate_enable(void)
 	 */
 	barrier();
 	p->migration_disabled = 0;
+#ifdef CONFIG_SCHED_ALT
+	sched_migrate_enable_finish(p);
+#endif
 	this_rq_pinned()--;
 }
 
@@ -2520,19 +2517,14 @@ static inline void __migrate_disable(void)
 	}
 
 	guard(preempt)();
-#ifdef CONFIG_SCHED_ALT
-	int cpu = smp_processor_id();
-	if (cpumask_test_cpu(cpu, &p->cpus_mask)) {
-#endif
 	this_rq_pinned()++;
 	p->migration_disabled = 1;
 #ifdef CONFIG_SCHED_ALT
-		/*
-		 * Violates locking rules! see comment in __do_set_cpus_ptr().
-		 */
-		if (p->cpus_ptr == &p->cpus_mask)
-				__do_set_cpus_ptr(p, cpumask_of(cpu));
-	}
+	/*
+	 * Violates locking rules! see comment in __do_set_cpus_ptr().
+	 */
+	if (p->cpus_ptr == &p->cpus_mask)
+		__do_set_cpus_ptr(p, cpumask_of(smp_processor_id()));
 #endif
 }
 #else /* !COMPILE_OFFSETS */
