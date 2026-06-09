@@ -2108,6 +2108,7 @@ void sched_migrate_enable_finish(struct task_struct *p)
 {
 	struct set_affinity_pending *pending;
 	bool complete = false;
+	int stop_cpu = nr_cpu_ids;
 	struct rq_flags rf;
 	struct rq *rq;
 
@@ -2116,11 +2117,17 @@ void sched_migrate_enable_finish(struct task_struct *p)
 
 	pending = p->migration_pending;
 	if (pending && !pending->stop_pending) {
-		p->migration_pending = NULL;
-		complete = true;
+		if (cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
+			p->migration_pending = NULL;
+			complete = true;
+		} else {
+			pending->stop_pending = true;
+			stop_cpu = cpu_of(rq);
+		}
 	}
 
-	if (complete || cpu_dying(cpu_of(rq))) {
+	if (complete || stop_cpu < nr_cpu_ids ||
+	    (pending && pending->stop_pending) || cpu_dying(cpu_of(rq))) {
 		if (!cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
 			if (task_on_rq_preempt(p) || task_on_cpu(p))
 				resched_curr(rq);
@@ -2131,6 +2138,11 @@ void sched_migrate_enable_finish(struct task_struct *p)
 
 	__task_modify_unlock(p, &rf);
 	raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
+
+	if (stop_cpu < nr_cpu_ids &&
+	    !stop_one_cpu_nowait(stop_cpu, migration_cpu_stop,
+				 &pending->arg, &pending->stop_work))
+		migration_stop_failed(pending);
 
 	if (complete)
 		complete_all(&pending->done);
@@ -2161,24 +2173,7 @@ static int affine_move_task(struct rq *rq, struct task_struct *p,
 	}
 
 	if (is_migration_disabled(p)) {
-		if (!(flags & SCA_MIGRATE_ENABLE)) {
-			if (!p->migration_pending) {
-				refcount_set(&my_pending.refs, 1);
-				init_completion(&my_pending.done);
-				my_pending.arg = (struct migration_arg) {
-					.task = p,
-					.pending = &my_pending,
-				};
-				p->migration_pending = &my_pending;
-			} else {
-				pending = p->migration_pending;
-				refcount_inc(&pending->refs);
-			}
-		}
-
-		pending = p->migration_pending;
-		if (!pending) {
-			WARN_ON_ONCE(!(flags & SCA_MIGRATE_ENABLE));
+		if (flags & SCA_MIGRATE_ENABLE) {
 			WARN_ON_ONCE(p != current);
 			if (task_on_rq_preempt(p))
 				preempt_cpu = READ_ONCE(p->wake_cpu);
@@ -2192,16 +2187,29 @@ static int affine_move_task(struct rq *rq, struct task_struct *p,
 			return 0;
 		}
 
+		if (!p->migration_pending) {
+			refcount_set(&my_pending.refs, 1);
+			init_completion(&my_pending.done);
+			my_pending.arg = (struct migration_arg) {
+				.task = p,
+				.pending = &my_pending,
+			};
+			p->migration_pending = &my_pending;
+		} else {
+			pending = p->migration_pending;
+			refcount_inc(&pending->refs);
+		}
+
+		pending = p->migration_pending;
+		if (WARN_ON_ONCE(!pending)) {
+			__task_modify_unlock(p, rf);
+			raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
+			return -EINVAL;
+		}
+
 		stop_pending = pending->stop_pending;
 		if (!stop_pending)
 			pending->stop_pending = true;
-
-		if (flags & SCA_MIGRATE_ENABLE) {
-			if (task_on_rq_preempt(p))
-				preempt_cpu = READ_ONCE(p->wake_cpu);
-			else if (task_on_cpu(p))
-				resched_curr(rq);
-		}
 
 		__task_modify_unlock(p, rf);
 		raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
@@ -2210,12 +2218,6 @@ static int affine_move_task(struct rq *rq, struct task_struct *p,
 		    !stop_one_cpu_nowait(task_cpu(p), migration_cpu_stop,
 					 &pending->arg, &pending->stop_work))
 			migration_stop_failed(pending);
-
-		if (preempt_cpu < nr_cpu_ids)
-			kick_preempt_cpu(preempt_cpu);
-
-		if (flags & SCA_MIGRATE_ENABLE)
-			return 0;
 
 		wait_for_completion(&pending->done);
 
