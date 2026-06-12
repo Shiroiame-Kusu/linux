@@ -419,8 +419,9 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 			continue;
 		}
 
-		if (task_on_rq_queued(p) && !p->on_cpu && READ_ONCE(p->__sched_prio) != -1) {
-			int idx = READ_ONCE(p->__sched_prio);
+		int idx = READ_ONCE(p->__sched_prio);
+
+		if (task_on_rq_queued(p) && !p->on_cpu && idx != -1) {
 			struct sched_run_queue *srq = cpu_srq(0);
 			raw_spinlock_t *lock = &srq->_lock[idx];
 
