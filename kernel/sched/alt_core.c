@@ -312,7 +312,6 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 	lockdep_assert_held(&p->pi_lock);
 	rf->lock = NULL;
 	rf->queued = false;
-	rf->rq_lock = false;
 
 	for (;;) {
 		if (TASK_ON_RQ_WAKING == p->on_rq) {
@@ -321,7 +320,6 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 			raw_spin_lock(&rq->lock);
 			if (likely(TASK_ON_RQ_WAKING == p->on_rq && rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -334,7 +332,6 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -345,7 +342,6 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				raw_spin_lock(&rq->lock);
 				if (likely(p->on_cpu && rq == task_rq(p))) {
 					rf->lock = &rq->lock;
-					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -357,7 +353,6 @@ static inline struct rq *__task_rq_lock(struct task_struct *p, struct rq_flags *
 				    READ_ONCE(p->__sched_prio) == -1 &&
 				    rq == task_rq(p)) {
 					rf->lock = &rq->lock;
-					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -407,7 +402,6 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		raw_spin_lock_irqsave(&p->pi_lock, rf->flags);
 		rf->lock = NULL;
 		rf->queued = false;
-		rf->rq_lock = false;
 
 		if (task_on_rq_preempt(p)) {
 			int wake_cpu = READ_ONCE(p->wake_cpu);
@@ -418,7 +412,6 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -448,7 +441,6 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 
 				rf->lock = &rq->lock;
 				rf->queued = true;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(lock);
@@ -478,7 +470,6 @@ struct rq *_task_rq_lock(struct task_struct *p, struct rq_flags *rf)
 		if (likely(rq == task_rq(p) && !task_on_rq_migrating(p) &&
 			   !task_on_rq_preempt(p))) {
 			rf->lock = &rq->lock;
-			rf->rq_lock = true;
 			return rq;
 		}
 		raw_spin_unlock(&rq->lock);
@@ -5565,7 +5556,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 	if (prio == p->prio)
 		goto out_unlock;
 
-	if (rf.rq_lock && unlikely(p == rq->idle)) {
+	if (unlikely(p == rq->idle)) {
 		WARN_ON(p != rq->curr);
 		WARN_ON(p->pi_blocked_on);
 		goto out_unlock;
@@ -5580,8 +5571,7 @@ void rt_mutex_setprio(struct task_struct *p, struct task_struct *pi_task)
 out_unlock:
 	/* Caller holds task_struct::pi_lock, IRQs are still disabled */
 
-	if (rf.rq_lock)
-		__balance_callbacks(rq);
+	__balance_callbacks(rq);
 	__task_modify_unlock(p, &rf);
 }
 #endif /* CONFIG_RT_MUTEXES */

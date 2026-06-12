@@ -193,7 +193,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 {
 	rf->lock = NULL;
 	rf->queued = false;
-	rf->rq_lock = false;
 
 	for (;;) {
 		if (TASK_ON_RQ_WAKING == p->on_rq) {
@@ -202,7 +201,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 			raw_spin_lock(&rq->lock);
 			if (likely(TASK_ON_RQ_WAKING == p->on_rq && rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -215,7 +213,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
@@ -227,7 +224,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				raw_spin_lock(&rq->lock);
 				if (likely(task_on_rq_queued(p) && p->on_cpu && rq == task_rq(p))) {
 					rf->lock = &rq->lock;
-					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -253,7 +249,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 
 					rf->lock = &rq->lock;
 					rf->queued = true;
-					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(lock);
@@ -265,7 +260,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				    READ_ONCE(p->__sched_prio) == -1 &&
 				    rq == task_rq(p)) {
 					rf->lock = &rq->lock;
-					rf->rq_lock = true;
 					return rq;
 				}
 				raw_spin_unlock(&rq->lock);
@@ -280,7 +274,6 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 			raw_spin_lock(&rq->lock);
 			if (likely(rq == task_rq(p))) {
 				rf->lock = &rq->lock;
-				rf->rq_lock = true;
 				return rq;
 			}
 			raw_spin_unlock(&rq->lock);
