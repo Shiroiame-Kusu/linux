@@ -389,7 +389,6 @@ struct rq_flags {
 	unsigned long	flags;
 	raw_spinlock_t	*lock;
 	bool		queued;
-	bool		rq_lock;
 };
 
 static inline void
