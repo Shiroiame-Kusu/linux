@@ -790,7 +790,7 @@ change:
 	/* Avoid rq from going away on us: */
 	preempt_disable();
 #ifdef CONFIG_SCHED_ALT
-	head = rf.rq_lock ? splice_balance_callbacks(rq) : NULL;
+	head = splice_balance_callbacks(rq);
 	task_access_unlock(p, &rf);
 #else
 	head = splice_balance_callbacks(rq);
