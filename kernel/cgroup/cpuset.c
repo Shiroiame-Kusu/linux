@@ -2994,7 +2994,7 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 	struct cpuset *cs, *oldcs;
 	struct task_struct *task;
 	bool setsched_check;
-	int cpu, ret;
+	int ret;
 
 	/* used later by cpuset_attach() */
 	cpuset_attach_old_cs = task_cs(cgroup_taskset_first(tset, &css));
@@ -3052,6 +3052,8 @@ static int cpuset_can_attach(struct cgroup_taskset *tset)
 	}
 
 #ifndef CONFIG_SCHED_ALT
+	int cpu;
+
 	if (!cs->sum_migrate_dl_bw)
 		goto out_success;
 
