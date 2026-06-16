@@ -44,17 +44,8 @@ task_sched_prio_normal(const struct task_struct *p, const struct rq *rq)
 
 static inline int task_sched_prio(const struct task_struct *p)
 {
-	int ret = (p->prio < MIN_NORMAL_PRIO)? (p->prio >> 2) :
+	return (p->prio < MIN_NORMAL_PRIO)? (p->prio >> 2) :
 		MIN_SCHED_NORMAL_PRIO + (p->prio + p->boost_prio - MIN_NORMAL_PRIO) / 2;
-
-	/*
-	 * Real tasks must stay below the idle sentinel: pick_next_task() only
-	 * scans SRQ buckets [0, IDLE_TASK_SCHED_PRIO) even when going idle, so a
-	 * task in a higher bucket is unpickable by every CPU and strands forever.
-	 * A heavily-niced (SCHED_IDLE/nice-19) task that is CPU-bound deboosts
-	 * (boost_prio -> +MAX_PRIORITY_ADJ) and can exceed it, so clamp.
-	 */
-	return min(ret, IDLE_TASK_SCHED_PRIO - 1);
 }
 
 static inline int task_running_nice(struct task_struct *p)
