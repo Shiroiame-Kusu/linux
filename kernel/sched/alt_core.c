@@ -4791,7 +4791,7 @@ static __always_inline void wakeup_srq_task(const int cpu)
 {
 	struct sched_run_queue *srq = cpu_srq(cpu);
 	int idx, kick_cpu = nr_cpu_ids;
-	int strand_pid = -1;	/* DIAG: grq task runnable on this going-idle cpu */
+	int strand_pid = -1, strand_idx = -1, strand_live = -1, strand_naff = -1;	/* DIAG */
 
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		struct llist_head *head = &srq->_head[idx];
@@ -4821,8 +4821,12 @@ static __always_inline void wakeup_srq_task(const int cpu)
 			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
 				continue;
 
-			if (strand_pid < 0 && is_cpu_allowed(p, cpu))
-				strand_pid = p->pid;	/* DIAG */
+			if (strand_pid < 0 && is_cpu_allowed(p, cpu)) {
+				strand_pid = p->pid;			/* DIAG */
+				strand_idx = idx;			/* bucket it sits in */
+				strand_live = task_sched_prio(p);	/* live recompute */
+				strand_naff = p->nr_cpus_allowed;
+			}
 
 			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
 				if (i == cpu || !is_cpu_allowed(p, i))
@@ -4841,10 +4845,18 @@ static __always_inline void wakeup_srq_task(const int cpu)
 			break;
 	}
 
-	/* DIAG: going idle, a grq task may run here, yet we woke nobody */
+	/*
+	 * DIAG: going idle while a grq task can run here, having woken nobody.
+	 * bucket >= idle@ (IDLE_TASK_SCHED_PRIO) => unpickable-bucket overflow
+	 * (pick_next_task caps its scan at idle@); bucket < idle@ => enqueue-vs-
+	 * goidle race (pick already covers that bucket). live != bucket => stale
+	 * __sched_prio. nr_allowed==1 explains why no other cpu was eligible.
+	 */
 	if (strand_pid >= 0 && kick_cpu >= nr_cpu_ids)
-		pr_warn_ratelimited("sched/alt: cpu %d goidle, grq pid %d runnable here, no cpu kicked (idle=%*pbl)\n",
-				    cpu, strand_pid, cpumask_pr_args(sched_idle_mask));
+		pr_warn_ratelimited("sched/alt: cpu %d goidle, pid %d bucket=%d live=%d idle@%d nr_allowed=%d, no cpu kicked (idle=%*pbl)\n",
+				    cpu, strand_pid, strand_idx, strand_live,
+				    IDLE_TASK_SCHED_PRIO, strand_naff,
+				    cpumask_pr_args(sched_idle_mask));
 
 	if (kick_cpu < nr_cpu_ids)
 		kick_preempt_cpu(kick_cpu);
