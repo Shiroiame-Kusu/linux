@@ -1451,6 +1451,13 @@ static __always_inline void notify_queued_task(struct task_struct *p)
 	if (wakeup_rq_kick(p))
 		return;
 
+	/* DIAG: queued to grq, kicked nobody -- but idle CPUs intersect affinity */
+	if (cpumask_intersects(p->cpus_ptr, sched_idle_mask))
+		pr_warn_ratelimited("sched/alt: queued %s/%d not kicked; idle CPUs exist (affinity=%*pbl idle=%*pbl)\n",
+				    p->comm, p->pid,
+				    cpumask_pr_args(p->cpus_ptr),
+				    cpumask_pr_args(sched_idle_mask));
+
 	cpu = queued_task_tick_cpu(p);
 	update_queued_task_tick_dependency(cpu);
 }
@@ -4784,6 +4791,7 @@ static __always_inline void wakeup_srq_task(const int cpu)
 {
 	struct sched_run_queue *srq = cpu_srq(cpu);
 	int idx, kick_cpu = nr_cpu_ids;
+	int strand_pid = -1;	/* DIAG: grq task runnable on this going-idle cpu */
 
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		struct llist_head *head = &srq->_head[idx];
@@ -4813,6 +4821,9 @@ static __always_inline void wakeup_srq_task(const int cpu)
 			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
 				continue;
 
+			if (strand_pid < 0 && is_cpu_allowed(p, cpu))
+				strand_pid = p->pid;	/* DIAG */
+
 			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
 				if (i == cpu || !is_cpu_allowed(p, i))
 					continue;
@@ -4829,6 +4840,11 @@ static __always_inline void wakeup_srq_task(const int cpu)
 		if (kick_cpu < nr_cpu_ids)
 			break;
 	}
+
+	/* DIAG: going idle, a grq task may run here, yet we woke nobody */
+	if (strand_pid >= 0 && kick_cpu >= nr_cpu_ids)
+		pr_warn_ratelimited("sched/alt: cpu %d goidle, grq pid %d runnable here, no cpu kicked (idle=%*pbl)\n",
+				    cpu, strand_pid, cpumask_pr_args(sched_idle_mask));
 
 	if (kick_cpu < nr_cpu_ids)
 		kick_preempt_cpu(kick_cpu);
@@ -4921,6 +4937,11 @@ static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, i
 			else
 				sched_cpu_topology_balance(cpu, rq);
 		}
+
+		/* DIAG: idling with a task on our preempt_list and no resched pending -> strand */
+		if (!is_preempt_list_empty(cpu) && !test_tsk_need_resched(idle))
+			pr_warn_ratelimited("sched/alt: cpu %d goidle, preempt_list non-empty, no resched pending\n",
+					    cpu);
 
 		schedstat_inc(rq->sched_goidle);
 		/*printk(KERN_INFO "sched: choose_next_task(%d) idle %px\n", cpu, next);*/
