@@ -139,6 +139,33 @@ for pid in "${PIDS[@]}"; do
 	collect_pid "$pid"
 done
 
+# Capture EVERY runnable (R) thread system-wide with stack + schedstat.
+# A scheduler strand shows up here as a thread that is R (runnable) but sitting
+# on no CPU: its stack is parked in schedule()/__schedule and its schedstat
+# field 2 (time spent runnable-but-not-running, ns) keeps climbing. This is the
+# data the pid-filtered collection above misses (e.g. containerized workloads
+# whose comm is not in the keyword list).
+section "all runnable (R-state) threads — stack + schedstat"
+for tstat in /proc/[0-9]*/task/[0-9]*/stat; do
+	read -r _ rest < "$tstat" 2>/dev/null || continue
+	# field 3 of stat is state; comm (field 2) may contain spaces inside (),
+	# so strip up to the last ') ' before reading state.
+	state=${rest##*) }
+	state=${state%% *}
+	[[ $state == R ]] || continue
+
+	tdir=${tstat%/stat}
+	tid=${tdir##*/}
+	pid=${tdir%/task/*}; pid=${pid##*/}
+	comm=$(cat "$tdir/comm" 2>/dev/null || true)
+
+	section "R-thread pid $pid tid $tid ($comm)"
+	printf 'schedstat (run_ns wait_ns timeslices): '
+	cat "$tdir/schedstat" 2>/dev/null || true
+	printf 'wchan: '; cat "$tdir/wchan" 2>/dev/null; printf '\n'
+	run_sudo_timeout 5 cat "$tdir/stack"
+done
+
 section "wchan sweep"
 for proc in /proc/[0-9]*; do
 	pid=${proc##*/}
