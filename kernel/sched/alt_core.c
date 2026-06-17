@@ -4263,6 +4263,23 @@ void sched_tick(void)
 	if (sched_feat(LATENCY_WARN))
 		resched_latency = cpu_resched_latency(rq);
 
+	/*
+	 * DIAG: catch a lost preempt-list wakeup. A task parked to this CPU's
+	 * preempt_list relies on this CPU re-entering __schedule(); if the kick
+	 * was dropped it strands on neither grq nor any path pick_next_task()/
+	 * wakeup_srq_task() scan. A non-empty preempt_list keeps idle_rq() false
+	 * so this CPU cannot NOHZ-stop its tick -- meaning a *local* check each
+	 * tick is sufficient (no cross-CPU sweep needed). If we are idle with a
+	 * non-empty list and no resched pending, that is the strand: report and
+	 * force a reschedule to recover. O(1), local cacheline only.
+	 */
+	if (rq->curr == rq->idle && !is_preempt_list_empty(cpu) &&
+	    !test_tsk_need_resched(rq->idle)) {
+		pr_warn_ratelimited("sched/alt: TICK cpu %d idle, non-empty preempt_list, no resched -> forcing\n",
+				    cpu);
+		resched_curr(rq);
+	}
+
 	raw_spin_unlock(&rq->lock);
 
 	if (sched_feat(LATENCY_WARN) && resched_latency)
