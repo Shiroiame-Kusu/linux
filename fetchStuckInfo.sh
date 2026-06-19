@@ -186,6 +186,44 @@ else
 		"$(command -v drgn || echo no)" "$([[ -r $VMLINUX ]] && echo yes || echo no)" "${#RTIDS[@]}"
 fi
 
+# THE no-load decider (catches what the R-state scan above misses). A task in
+# TASK_RUNNING(0) MUST be either on a cpu (on_cpu==1) or queued (on_rq!=0). If it
+# is RUNNING yet on_cpu==0 AND on_rq==0, the scheduler LOST it -- a dropped
+# wakeup/enqueue. That is the "idle machine, app stuck on futex" signature, which
+# the R-state scan cannot see because the victim is parked in schedule() (state
+# shows as sleeping in /proc but the kernel's authoritative __state is RUNNING).
+# on_rq!=0 while cpus idle = a dispatch strand. Two passes ~1.5s apart: a tid in
+# BOTH passes is a confirmed persistent loss (a single hit can be a switch transient).
+section "system-wide LOST-task scan via drgn (off-rq + RUNNING = dropped wakeup)"
+if command -v drgn >/dev/null && [[ -r $VMLINUX ]]; then
+	for pass in 1 2; do
+		printf -- '--- pass %d ---\n' "$pass"
+		timeout 40s "${SUDO[@]}" drgn -s "$VMLINUX" -e '
+try:
+    tasks = for_each_task()
+except TypeError:
+    tasks = for_each_task(prog)
+for t in tasks:
+    try:
+        on_rq = t.on_rq.value_(); st = t.__state.value_(); on_cpu = t.on_cpu.value_()
+    except Exception:
+        continue
+    if st == 0 and on_cpu == 0 and on_rq == 0:
+        print("LOST tid=%d comm=%s wake_cpu=%d prio=%d" % (
+            t.pid.value_(), t.comm.string_().decode(), t.wake_cpu.value_(), t.__sched_prio.value_()))
+    elif on_rq != 0:
+        print("ONRQ tid=%d comm=%s on_rq=%d state=0x%x on_cpu=%d wake_cpu=%d prio=%d" % (
+            t.pid.value_(), t.comm.string_().decode(), on_rq, st, on_cpu,
+            t.wake_cpu.value_(), t.__sched_prio.value_()))
+' 2>&1 | grep -vE "missing debugging symbols|missing some debugging|^warning: " || true
+		[[ $pass == 1 ]] && sleep 1.5
+	done
+	printf 'VERDICT: a LOST tid in BOTH passes = confirmed dropped wakeup (kernel bug).\n'
+	printf '         an ONRQ tid in BOTH passes while cpus idle = dispatch strand.\n'
+else
+	printf 'skipped: drgn or vmlinux unavailable\n'
+fi
+
 section "all runnable (R-state) threads — stack + schedstat"
 for tdir in "${RTDIRS[@]}"; do
 	[[ -d $tdir ]] || continue
