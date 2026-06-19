@@ -2996,8 +2996,59 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 */
 	scoped_guard (raw_spinlock_irqsave, &p->pi_lock) {
 		smp_mb__after_spinlock();
-		if (!ttwu_state_match(p, state, &success))
-			break;
+		if (!ttwu_state_match(p, state, &success)) {
+			/*
+			 * Lost-wakeup strand recovery. A task left in TASK_RUNNING
+			 * while off every runqueue (on_rq == 0) and off-CPU is
+			 * unreachable: a prior block_task() released p->on_rq to 0
+			 * but p->__state was left RUNNING, so the wake mask cannot
+			 * match in ttwu_state_match() and this task -- plus any
+			 * pending SIGKILL -- would be dropped forever (futex stuck,
+			 * unkillable, then zombie).
+			 *
+			 * Classifying this is sound because every transient
+			 * "RUNNING && on_rq == 0" state in this scheduler is produced
+			 * under p->pi_lock, which we hold here, so no such transition
+			 * can be in flight underneath us:
+			 *   - wakeup_preempt_on_rq() sets __state=RUNNING then
+			 *     on_rq=PREEMPT, always under pi_lock (ttwu_do_activate,
+			 *     wake_up_new_task, wakeup_modified_task, activate_task);
+			 *   - the MIGRATING (on_rq==2) setters in _task_rq_lock() and
+			 *     __task_modify_lock() run under pi_lock;
+			 *   - the ttwu WAKING window uses __state==TASK_WAKING, not
+			 *     RUNNING, and on_rq==WAKING(11) is never written.
+			 * The lone producer that sets __state=RUNNING before on_rq
+			 * WITHOUT pi_lock is the async wakelist drain
+			 * sched_ttwu_pending(); it is dead in this build
+			 * (ALT_SCHED_TTWU_QUEUE undefined). Trip a build-time guard so
+			 * this recovery is re-audited before that path can ship --
+			 * otherwise a concurrent drain could be misclassified here and
+			 * double-enqueue the same p->pq_node.
+			 *
+			 * Require on_rq == 0 exactly (not merely !queued && !preempt)
+			 * so MIGRATING/WAKING/any future on_rq encoding cannot slip
+			 * through. Do NOT enqueue here -- fall through to the normal
+			 * path below, which performs the required
+			 * WRITE_ONCE(TASK_WAKING) + smp_cond_load_acquire(&p->on_cpu)
+			 * ordering before touching any rq state (the omission of which
+			 * previously corrupted the kernel stack). The on_rq recheck at
+			 * the smp_rmb() below still routes a task requeued during the
+			 * race through ttwu_runnable() instead of re-enqueueing it.
+			 */
+			BUILD_BUG_ON(__is_defined(ALT_SCHED_TTWU_QUEUE));
+
+			if (READ_ONCE(p->__state) == TASK_RUNNING &&
+			    READ_ONCE(p->on_rq) == 0 &&
+			    !READ_ONCE(p->on_cpu)) {
+				pr_warn_ratelimited("sched/alt: lost-wakeup strand: recovering %s/%d, waker %s/%d, wake_cpu=%d\n",
+						    p->comm, p->pid, current->comm,
+						    current->pid, READ_ONCE(p->wake_cpu));
+				success = 1;
+				/* fall through into the normal wakeup path */
+			} else {
+				break;
+			}
+		}
 
 		trace_sched_waking(p);
 
