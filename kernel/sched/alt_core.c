@@ -4663,7 +4663,7 @@ static __always_inline int check_curr(struct task_struct *p, struct rq *rq)
 	return 0;
 }
 
-static __always_inline void wakeup_srq_task(const int cpu);
+static __always_inline int wakeup_srq_task(const int cpu);
 
 static __always_inline bool preempt_task_can_run_on(struct task_struct *p, const int cpu)
 {
@@ -4804,7 +4804,13 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 	return preempt;
 }
 
-static __always_inline void wakeup_srq_task(const int cpu)
+/*
+ * Scan the global run queue on behalf of a CPU that is about to go idle.
+ * Kicks an eligible *other* CPU for a runnable grq task, and returns the
+ * bucket index of a task that is runnable on @cpu itself (or -1 if none) so
+ * the caller can re-pick rather than idle next to runnable work.
+ */
+static __always_inline int wakeup_srq_task(const int cpu)
 {
 	struct sched_run_queue *srq = cpu_srq(cpu);
 	int idx, kick_cpu = nr_cpu_ids;
@@ -4877,6 +4883,9 @@ static __always_inline void wakeup_srq_task(const int cpu)
 
 	if (kick_cpu < nr_cpu_ids)
 		kick_preempt_cpu(kick_cpu);
+
+	/* >= 0 bucket of a task runnable on @cpu itself; caller should re-pick */
+	return strand_idx;
 }
 
 #define PQ_PICK_TASK										\
@@ -4919,16 +4928,18 @@ static __always_inline void wakeup_srq_task(const int cpu)
 
 static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, int expired)
 {
-	struct sched_run_queue *srq;
+	struct sched_run_queue *srq = cpu_srq(cpu);
+	struct task_struct *idle = rq->idle;
 	struct task_struct *next;
 	bool blocked = rq->block;
+	bool repicked = false;
 	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO : READ_ONCE(cpu_prio[cpu]) + expired;
 
+repick:
 	if ((next = pick_preempt_task(cpu, pick_sched_prio)))
 		goto picked;
 
 	/* pick next task from schedule run queue */
-	srq = cpu_srq(cpu);
 	if (!bitmap_empty(srq->bitmap, pick_sched_prio)) {
 		int idx;
 		DECLARE_BITMAP(lock_bitmap, SCHED_QUEUE_BITS) = { 0 };
@@ -4957,13 +4968,29 @@ static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, i
 		}
 	}
 
-	struct task_struct *idle = rq->idle;
 	next = blocked ? idle : rq->curr;
 	if (next == idle) {
 		if (rq->online) {
-			if (srq_nr_queued(cpu))
-				wakeup_srq_task(cpu);
-			else
+			if (srq_nr_queued(cpu)) {
+				int sidx = wakeup_srq_task(cpu);
+
+				/*
+				 * A task became runnable on THIS cpu in the race window
+				 * after the grq scan above, and no cpu picked it up
+				 * (wakeup_srq_task() excludes the current cpu, so when
+				 * this is the only eligible cpu nobody is kicked). Do not
+				 * idle next to runnable work: re-pick once across all
+				 * buckets -- a cpu about to idle may run any priority.
+				 * One-shot via @repicked so it cannot livelock; if the
+				 * task was meanwhile taken by another cpu the re-scan
+				 * finds nothing and we idle as before.
+				 */
+				if (sidx >= 0 && !repicked) {
+					repicked = true;
+					pick_sched_prio = SCHED_QUEUE_BITS;
+					goto repick;
+				}
+			} else
 				sched_cpu_topology_balance(cpu, rq);
 		}
 
