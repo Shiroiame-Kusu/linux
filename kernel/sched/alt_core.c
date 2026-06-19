@@ -2996,36 +2996,8 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	 */
 	scoped_guard (raw_spinlock_irqsave, &p->pi_lock) {
 		smp_mb__after_spinlock();
-		if (!ttwu_state_match(p, state, &success)) {
-			/*
-			 * Safety net for a lost-wakeup strand. A task left in
-			 * TASK_RUNNING while off every runqueue (!queued && !preempt)
-			 * and off-CPU is unreachable: some path cleared p->on_rq
-			 * without re-enqueueing it (block_task ran, then __state was
-			 * overwritten to RUNNING). The wake mask can't match RUNNING,
-			 * so ttwu() would no-op here and the task sleeps forever --
-			 * futex stuck, unkillable (SIGKILL's ttwu no-ops too), then
-			 * zombie. We hold p->pi_lock, so no other waker can be
-			 * enqueueing it concurrently; the read is stable and the state
-			 * is unambiguous. Re-activate it so it -- and any pending
-			 * SIGKILL -- can make progress, and log the waker so the
-			 * root-cause producer of the bad state can still be traced.
-			 */
-			if (success == 0 &&
-			    READ_ONCE(p->__state) == TASK_RUNNING &&
-			    !task_on_rq_queued(p) && !task_on_rq_preempt(p) &&
-			    !READ_ONCE(p->on_cpu)) {
-				pr_warn_ratelimited("sched/alt: lost-wakeup strand: re-activating %s/%d, waker %s/%d, wake_cpu=%d\n",
-						    p->comm, p->pid,
-						    current->comm, current->pid,
-						    READ_ONCE(p->wake_cpu));
-				trace_sched_waking(p);
-				sched_task_ttwu(p);
-				ttwu_do_activate(p, wake_flags);
-				success = 1;
-			}
+		if (!ttwu_state_match(p, state, &success))
 			break;
-		}
 
 		trace_sched_waking(p);
 
