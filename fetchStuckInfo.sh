@@ -145,16 +145,50 @@ done
 # field 2 (time spent runnable-but-not-running, ns) keeps climbing. This is the
 # data the pid-filtered collection above misses (e.g. containerized workloads
 # whose comm is not in the keyword list).
-section "all runnable (R-state) threads — stack + schedstat"
+# Collect R-state threads first (as full task dir paths) so we can read their
+# authoritative on_rq via drgn and re-use the exact path for stack/schedstat.
+RTDIRS=()
+RTIDS=()
 for tstat in /proc/[0-9]*/task/[0-9]*/stat; do
 	read -r _ rest < "$tstat" 2>/dev/null || continue
-	# field 3 of stat is state; comm (field 2) may contain spaces inside (),
-	# so strip up to the last ') ' before reading state.
-	state=${rest##*) }
-	state=${state%% *}
+	# field 3 is state; comm (field 2) may contain ') ' so strip to last ') '.
+	state=${rest##*) }; state=${state%% *}
 	[[ $state == R ]] || continue
-
 	tdir=${tstat%/stat}
+	RTDIRS+=("$tdir")
+	RTIDS+=("${tdir##*/}")
+done
+
+# The DECIDER: on_rq from live kernel memory (ps "R" is NOT authoritative).
+#   on_rq != 0 (1=QUEUED 2=MIGRATING 11=WAKING 12=PREEMPT) => REAL scheduler strand.
+#   on_rq == 0 with state TASK_RUNNING(0x0) => off-rq, asleep (e.g. futex) => userspace.
+# Requires vmlinux (repo root, DWARF) + drgn. Best-effort; skipped if unavailable.
+section "R-thread on_rq via drgn (authoritative strand decider)"
+VMLINUX="$(dirname "$(readlink -f "$0")")/vmlinux"
+[[ -r $VMLINUX ]] || VMLINUX=./vmlinux
+if command -v drgn >/dev/null && [[ -r $VMLINUX && ${#RTIDS[@]} -gt 0 ]]; then
+	printf 'tids: %s\n' "${RTIDS[*]}"
+	timeout 30s "${SUDO[@]}" drgn -s "$VMLINUX" -e '
+import sys
+tids = [int(x) for x in "'"${RTIDS[*]}"'".split()]
+for tid in tids:
+    t = find_task(tid)
+    if not t:
+        print(tid, "-> gone"); continue
+    on_rq = t.on_rq.value_()
+    verdict = "STRAND(on_rq!=0)" if on_rq != 0 else "userspace(off-rq)"
+    print("tid=%d comm=%s on_rq=%d state=0x%x on_cpu=%d wake_cpu=%d __sched_prio=%d pq_node.next=0x%x  -> %s" % (
+        tid, t.comm.string_().decode(), on_rq, t.__state.value_(), t.on_cpu.value_(),
+        t.wake_cpu.value_(), t.__sched_prio.value_(), t.pq_node.next.value_(), verdict))
+' 2>&1 | grep -vE "missing debugging symbols|missing some debugging|^warning: " || true
+else
+	printf 'skipped: drgn=%s vmlinux=%s rtids=%d\n' \
+		"$(command -v drgn || echo no)" "$([[ -r $VMLINUX ]] && echo yes || echo no)" "${#RTIDS[@]}"
+fi
+
+section "all runnable (R-state) threads — stack + schedstat"
+for tdir in "${RTDIRS[@]}"; do
+	[[ -d $tdir ]] || continue
 	tid=${tdir##*/}
 	pid=${tdir%/task/*}; pid=${pid##*/}
 	comm=$(cat "$tdir/comm" 2>/dev/null || true)
