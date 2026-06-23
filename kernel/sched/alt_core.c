@@ -3708,25 +3708,42 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 static void sched_strand_watchdog_fn(struct work_struct *work);
 static DECLARE_DELAYED_WORK(sched_strand_watchdog, sched_strand_watchdog_fn);
 
+/* Backstop scan interval -- a strand auto-recovers within this bound. */
+#define SCHED_STRAND_WATCHDOG_INTERVAL	(HZ / 10)	/* 100 ms */
+
 static void sched_strand_watchdog_fn(struct work_struct *work)
 {
+	/* DIAG: rate-limit the strand stack dumps used to localize the producer. */
+	static DEFINE_RATELIMIT_STATE(strand_dump_rs, 5 * HZ, 3);
 	struct task_struct *g, *p;
 
 	rcu_read_lock();
 	for_each_process_thread(g, p) {
 		if (READ_ONCE(p->__state) == TASK_RUNNING &&
 		    !READ_ONCE(p->on_cpu) &&
-		    READ_ONCE(p->on_rq) == 0)
+		    READ_ONCE(p->on_rq) == 0) {
+			/*
+			 * DIAG: dump the strand's saved stack (where it last
+			 * scheduled out) to localize the producing race. Same
+			 * rcu_read_lock + sched_show_task() pattern as sysrq-t /
+			 * show_state_filter(). Revert with the rest of the
+			 * diagnostics once the producer is fixed.
+			 */
+			if (__ratelimit(&strand_dump_rs))
+				sched_show_task(p);
 			wake_up_process(p);
+		}
 	}
 	rcu_read_unlock();
 
-	schedule_delayed_work(&sched_strand_watchdog, HZ);
+	schedule_delayed_work(&sched_strand_watchdog,
+			      SCHED_STRAND_WATCHDOG_INTERVAL);
 }
 
 static int __init sched_strand_watchdog_init(void)
 {
-	schedule_delayed_work(&sched_strand_watchdog, HZ);
+	schedule_delayed_work(&sched_strand_watchdog,
+			      SCHED_STRAND_WATCHDOG_INTERVAL);
 	return 0;
 }
 late_initcall(sched_strand_watchdog_init);
