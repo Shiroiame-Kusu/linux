@@ -59,76 +59,85 @@ static __always_inline void sched_set_idle_mask(const unsigned int cpu)
 {
 	int topo = per_cpu(sched_cpu_topo, cpu);
 
-	cpumask_set_cpu(cpu, sched_idle_mask);
-
-	if (CPU_TOPOLOGY_DEFAULT == topo) {
-		set_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
-		return;
-	}
-
-	if (topo < CPU_TOPOLOGY_NONE) {
+	switch (topo) {
+	case CPU_TOPOLOGY_DEFAULT:
+		break;
+	case CPU_TOPOLOGY_UCORE:
+	case CPU_TOPOLOGY_PCORE:
+	case CPU_TOPOLOGY_ECORE:
 		topo--;
 		cpumask_set_cpu(cpu, cpu_sched_prio_mask + topo);
 		set_bit(topo, cpu_sched_prio_bitmap);
-		return;
-	}
+		break;
 #ifdef CONFIG_SCHED_SMT
-	topo -= CPU_TOPOLOGY_UCORE_SMT;
-	if (cpumask_weight_and(cpu_smt_mask(cpu), sched_idle_mask) > 1) {
-		cpumask_or(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-			   cpu_smt_mask(cpu));
-		set_bit(topo, cpu_sched_prio_bitmap);
+	case CPU_TOPOLOGY_UCORE_SMT:
+	case CPU_TOPOLOGY_PCORE_SMT:
+	case CPU_TOPOLOGY_ECORE_SMT:
+		topo -= CPU_TOPOLOGY_UCORE_SMT;
+		if (cpumask_intersects(cpu_smt_mask(cpu), sched_idle_mask)) {
+			cpumask_or(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
+				   cpu_smt_mask(cpu));
+			set_bit(topo, cpu_sched_prio_bitmap);
 
-		topo += 3;
-		if (!cpumask_andnot(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-				    cpu_smt_mask(cpu)))
-			clear_bit(topo, cpu_sched_prio_bitmap);
-	} else {
-		topo += 3;
-		cpumask_set_cpu(cpu, cpu_sched_prio_mask + topo);
-		set_bit(topo, cpu_sched_prio_bitmap);
-	}
+			topo += 3;
+			if (!cpumask_andnot(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
+					    cpu_smt_mask(cpu)))
+				clear_bit(topo, cpu_sched_prio_bitmap);
+		} else {
+			topo += 3;
+			cpumask_set_cpu(cpu, cpu_sched_prio_mask + topo);
+			set_bit(topo, cpu_sched_prio_bitmap);
+		}
+		break;
 #endif
+	}
+
+	cpumask_set_cpu(cpu, sched_idle_mask);
+	set_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
 }
 
 static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 {
 	int topo = per_cpu(sched_cpu_topo, cpu);
 
-	cpumask_clear_cpu(cpu, sched_idle_mask);
-
-	if (CPU_TOPOLOGY_DEFAULT == topo) {
-		if (cpumask_empty(sched_idle_mask))
-			clear_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
-		return;
-	}
-
-	if (topo < CPU_TOPOLOGY_NONE) {
+	switch (topo) {
+	case CPU_TOPOLOGY_DEFAULT:
+		break;
+	case CPU_TOPOLOGY_UCORE:
+	case CPU_TOPOLOGY_PCORE:
+	case CPU_TOPOLOGY_ECORE:
 		topo--;
 		cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
 		if (cpumask_empty(cpu_sched_prio_mask + topo))
 			clear_bit(topo, cpu_sched_prio_bitmap);
-		return;
-	}
+		break;
 #ifdef CONFIG_SCHED_SMT
-	topo -= CPU_TOPOLOGY_UCORE_SMT;
-	if (cpumask_test_cpu(cpu, cpu_sched_prio_mask + topo)) {
-		if (!cpumask_andnot(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-				    cpu_smt_mask(cpu)))
-			clear_bit(topo, cpu_sched_prio_bitmap);
+	case CPU_TOPOLOGY_UCORE_SMT:
+	case CPU_TOPOLOGY_PCORE_SMT:
+	case CPU_TOPOLOGY_ECORE_SMT:
+		topo -= CPU_TOPOLOGY_UCORE_SMT;
+		if (cpumask_test_cpu(cpu, cpu_sched_prio_mask + topo)) {
+			if (!cpumask_andnot(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
+					    cpu_smt_mask(cpu)))
+				clear_bit(topo, cpu_sched_prio_bitmap);
 
-		topo += 3;
-		cpumask_or(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-			   cpu_smt_mask(cpu));
-		cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
-		set_bit(topo, cpu_sched_prio_bitmap);
-	} else {
-		topo += 3;
-		cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
-		if (cpumask_empty(cpu_sched_prio_mask + topo))
-			clear_bit(topo, cpu_sched_prio_bitmap);
-	}
+			topo += 3;
+			cpumask_or(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
+				   cpu_smt_mask(cpu));
+			cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
+			set_bit(topo, cpu_sched_prio_bitmap);
+		} else {
+			topo += 3;
+			cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
+			if (cpumask_empty(cpu_sched_prio_mask + topo))
+				clear_bit(topo, cpu_sched_prio_bitmap);
+		}
 #endif
+	}
+
+	cpumask_clear_cpu(cpu, sched_idle_mask);
+	if (cpumask_empty(sched_idle_mask))
+		clear_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
 }
 
 
