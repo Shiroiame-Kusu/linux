@@ -3688,6 +3688,49 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 	sched_update_tick_dependency(rq);
 }
 
+/*
+ * Lost-wakeup strand watchdog.
+ *
+ * try_to_wake_up()'s recovery re-activates a task left TASK_RUNNING while off
+ * every runqueue (on_rq == 0) and off-CPU -- but only when a wakeup is actually
+ * attempted on it. A task stranded that way which nobody tries to wake (a
+ * runnable task that merely needs to be put back on a runqueue) is otherwise
+ * stuck forever while CPUs sit idle (observed: a game worker strands on_rq==0/
+ * __state==RUNNING while 22 CPUs are idle and the render thread spins on it).
+ *
+ * Periodically find such tasks and poke a wakeup. It routes through the
+ * (reviewed) try_to_wake_up() recovery gate, which re-validates the state under
+ * p->pi_lock and re-enqueues -- so a lockless false positive observed here is a
+ * harmless no-op there. The gate's own pr_warn reports each recovery, with
+ * waker == this kworker identifying it as a no-wakeup strand. This is a backstop
+ * for the (still unlocated) producer race, not a fix for it.
+ */
+static void sched_strand_watchdog_fn(struct work_struct *work);
+static DECLARE_DELAYED_WORK(sched_strand_watchdog, sched_strand_watchdog_fn);
+
+static void sched_strand_watchdog_fn(struct work_struct *work)
+{
+	struct task_struct *g, *p;
+
+	rcu_read_lock();
+	for_each_process_thread(g, p) {
+		if (READ_ONCE(p->__state) == TASK_RUNNING &&
+		    !READ_ONCE(p->on_cpu) &&
+		    READ_ONCE(p->on_rq) == 0)
+			wake_up_process(p);
+	}
+	rcu_read_unlock();
+
+	schedule_delayed_work(&sched_strand_watchdog, HZ);
+}
+
+static int __init sched_strand_watchdog_init(void)
+{
+	schedule_delayed_work(&sched_strand_watchdog, HZ);
+	return 0;
+}
+late_initcall(sched_strand_watchdog_init);
+
 static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
 {
 	void (*func)(struct rq *rq);
