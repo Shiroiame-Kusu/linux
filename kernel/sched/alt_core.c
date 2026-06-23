@@ -3724,13 +3724,28 @@ static void sched_strand_watchdog_fn(struct work_struct *work)
 		    READ_ONCE(p->on_rq) == 0) {
 			/*
 			 * DIAG: dump the strand's saved stack (where it last
-			 * scheduled out) to localize the producing race. Same
-			 * rcu_read_lock + sched_show_task() pattern as sysrq-t /
-			 * show_state_filter(). Revert with the rest of the
-			 * diagnostics once the producer is fixed.
+			 * scheduled out) plus its priority-inheritance state, to
+			 * test the hypothesis that the producer is the PI
+			 * rt_mutex_setprio() re-queue. prio != normal_prio means
+			 * PI-boosted; pi_blocked means it is itself a PI waiter;
+			 * sched_rt_mutex means it is in the rt_mutex schedule
+			 * path. Same rcu_read_lock + sched_show_task() pattern as
+			 * sysrq-t / show_state_filter(). Revert with the rest of
+			 * the diagnostics once the producer is fixed.
 			 */
-			if (__ratelimit(&strand_dump_rs))
+			if (__ratelimit(&strand_dump_rs)) {
+#ifdef CONFIG_RT_MUTEXES
+				pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d pi_blocked=%d sched_rt_mutex=%u\n",
+					p->comm, task_pid_nr(p), p->prio,
+					p->normal_prio, !!p->pi_blocked_on,
+					p->sched_rt_mutex);
+#else
+				pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d\n",
+					p->comm, task_pid_nr(p), p->prio,
+					p->normal_prio);
+#endif
 				sched_show_task(p);
+			}
 			wake_up_process(p);
 		}
 	}
