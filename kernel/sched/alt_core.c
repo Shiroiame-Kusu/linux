@@ -4865,7 +4865,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 {
 	struct sched_run_queue *srq = cpu_srq(cpu);
 	int idx, kick_cpu = nr_cpu_ids;
-	int strand_pid = -1, strand_idx = -1, strand_live = -1, strand_naff = -1;	/* DIAG */
+	int strand_pid = -1, strand_idx = -1;	/* strand_idx drives the re-pick; pid is DIAG */
 
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		struct llist_head *head = &srq->_head[idx];
@@ -4895,11 +4895,9 @@ static __always_inline int wakeup_srq_task(const int cpu)
 			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
 				continue;
 
-			if (strand_pid < 0 && is_cpu_allowed(p, cpu)) {
-				strand_pid = p->pid;			/* DIAG */
-				strand_idx = idx;			/* bucket it sits in */
-				strand_live = task_sched_prio(p);	/* live recompute */
-				strand_naff = p->nr_cpus_allowed;
+			if (strand_idx < 0 && is_cpu_allowed(p, cpu)) {
+				strand_idx = idx;	/* bucket of a task runnable on @cpu */
+				strand_pid = p->pid;	/* DIAG */
 			}
 
 			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
@@ -4920,17 +4918,12 @@ static __always_inline int wakeup_srq_task(const int cpu)
 	}
 
 	/*
-	 * DIAG: going idle while a grq task can run here, having woken nobody.
-	 * bucket >= idle@ (IDLE_TASK_SCHED_PRIO) => unpickable-bucket overflow
-	 * (pick_next_task caps its scan at idle@); bucket < idle@ => enqueue-vs-
-	 * goidle race (pick already covers that bucket). live != bucket => stale
-	 * __sched_prio. nr_allowed==1 explains why no other cpu was eligible.
+	 * DIAG: a grq task runnable on @cpu found no cpu to kick at go-idle; the
+	 * caller re-picks it (a7c6f497). Keep this tracer until that path ships.
 	 */
 	if (strand_pid >= 0 && kick_cpu >= nr_cpu_ids)
-		pr_warn_ratelimited("sched/alt: cpu %d goidle, pid %d bucket=%d live=%d idle@%d nr_allowed=%d, no cpu kicked (idle=%*pbl)\n",
-				    cpu, strand_pid, strand_idx, strand_live,
-				    IDLE_TASK_SCHED_PRIO, strand_naff,
-				    cpumask_pr_args(sched_idle_mask));
+		pr_warn_ratelimited("sched/alt: cpu %d goidle, pid %d bucket=%d, no cpu kicked\n",
+				    cpu, strand_pid, strand_idx);
 
 	if (kick_cpu < nr_cpu_ids)
 		kick_preempt_cpu(kick_cpu);
@@ -5044,11 +5037,6 @@ repick:
 			} else
 				sched_cpu_topology_balance(cpu, rq);
 		}
-
-		/* DIAG: idling with a task on our preempt_list and no resched pending -> strand */
-		if (!is_preempt_list_empty(cpu) && !test_tsk_need_resched(idle))
-			pr_warn_ratelimited("sched/alt: cpu %d goidle, preempt_list non-empty, no resched pending\n",
-					    cpu);
 
 		schedstat_inc(rq->sched_goidle);
 		/*printk(KERN_INFO "sched: choose_next_task(%d) idle %px\n", cpu, next);*/
