@@ -3841,36 +3841,49 @@ static void sched_strand_watchdog_fn(struct work_struct *work)
 
 	rcu_read_lock();
 	for_each_process_thread(g, p) {
-		if (READ_ONCE(p->__state) == TASK_RUNNING &&
-		    !READ_ONCE(p->on_cpu) &&
-		    READ_ONCE(p->on_rq) == 0) {
-			/*
-			 * DIAG: dump the strand's saved stack (where it last
-			 * scheduled out) plus its priority-inheritance state, to
-			 * test the hypothesis that the producer is the PI
-			 * rt_mutex_setprio() re-queue. prio != normal_prio means
-			 * PI-boosted; pi_blocked means it is itself a PI waiter;
-			 * sched_rt_mutex means it is in the rt_mutex schedule
-			 * path. Same rcu_read_lock + sched_show_task() pattern as
-			 * sysrq-t / show_state_filter(). Revert with the rest of
-			 * the diagnostics once the producer is fixed.
-			 */
-			if (__ratelimit(&strand_dump_rs)) {
-#ifdef CONFIG_RT_MUTEXES
-				pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d pi_blocked=%d sched_rt_mutex=%u\n",
-					p->comm, task_pid_nr(p), p->prio,
-					p->normal_prio, !!p->pi_blocked_on,
-					p->sched_rt_mutex);
-#else
-				pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d\n",
-					p->comm, task_pid_nr(p), p->prio,
-					p->normal_prio);
-#endif
-				sched_show_task(p);
-				sched_trace_dump(p);
-			}
-			wake_up_process(p);
+		bool stranded = false;
+
+		/* Cheap lockless pre-filter; re-validated under pi_lock below. */
+		if (READ_ONCE(p->__state) != TASK_RUNNING ||
+		    READ_ONCE(p->on_cpu) ||
+		    READ_ONCE(p->on_rq) != 0)
+			continue;
+
+		/*
+		 * Re-validate under pi_lock for a CONSISTENT snapshot. A waker
+		 * holds p->pi_lock across the whole wakeup, including the brief
+		 * window where wakeup_preempt_on_rq() has set __state=RUNNING
+		 * but preempt_on_rq_locked() has not yet set on_rq. Taking
+		 * pi_lock serializes against that, so a task merely mid-wakeup
+		 * (or a torn lockless read above) is no longer RUNNING &&
+		 * on_rq==0 here -- only a genuine strand survives. This is the
+		 * same invariant the try_to_wake_up() recovery gate enforces.
+		 * pi_lock is released before wake_up_process() (which retakes
+		 * it) to avoid self-deadlock.
+		 */
+		scoped_guard(raw_spinlock_irqsave, &p->pi_lock) {
+			stranded = (READ_ONCE(p->__state) == TASK_RUNNING &&
+				    !READ_ONCE(p->on_cpu) &&
+				    READ_ONCE(p->on_rq) == 0);
 		}
+		if (!stranded)
+			continue;
+
+		if (__ratelimit(&strand_dump_rs)) {
+#ifdef CONFIG_RT_MUTEXES
+			pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d pi_blocked=%d sched_rt_mutex=%u\n",
+				p->comm, task_pid_nr(p), p->prio,
+				p->normal_prio, !!p->pi_blocked_on,
+				p->sched_rt_mutex);
+#else
+			pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d\n",
+				p->comm, task_pid_nr(p), p->prio,
+				p->normal_prio);
+#endif
+			sched_show_task(p);
+			sched_trace_dump(p);
+		}
+		wake_up_process(p);
 	}
 	rcu_read_unlock();
 
