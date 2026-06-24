@@ -55,7 +55,6 @@
 #define LENOVO_CAPABILITY_DATA_01_GUID "7A8F5407-CB67-4D6E-B547-39B3BE018154"
 #define LENOVO_FAN_TEST_DATA_GUID "B642801B-3D21-45DE-90AE-6E86F164FB21"
 
-#define ACPI_AC_CLASS "ac_adapter"
 #define ACPI_AC_NOTIFY_STATUS 0x80
 
 #define LWMI_FEATURE_ID_FAN_TEST 0x05
@@ -514,7 +513,7 @@ static void lwmi_cd00_show(struct seq_file *s, struct capdata00 *cd00)
 static void lwmi_cd01_show(struct seq_file *s, struct capdata01 *cd01)
 {
 	/* capdata01 is an extension to capdata00. */
-	lwmi_cd00_show(s, (struct capdata00 *)cd01);
+	lwmi_cd00_show(s, &cd01->cd00);
 
 	seq_printf(s, "  step:           %u\n", cd01->step);
 	seq_printf(s, "  min_value:      %u\n", cd01->min_value);

@@ -3487,7 +3487,6 @@ group_create_queue(struct panthor_group *group,
 	struct drm_sched_init_args sched_args = {
 		.ops = &panthor_queue_sched_ops,
 		.submit_wq = group->ptdev->scheduler->wq,
-		.num_rqs = 1,
 		/*
 		 * The credit limit argument tells us the total number of
 		 * instructions across all CS slots in the ringbuffer, with
@@ -3916,7 +3915,7 @@ static void job_release(struct kref *ref)
 	if (job->base.s_fence)
 		drm_sched_job_cleanup(&job->base);
 
-	if (job->done_fence && job->done_fence->ops)
+	if (dma_fence_was_initialized(job->done_fence))
 		dma_fence_put(job->done_fence);
 	else
 		dma_fence_free(job->done_fence);

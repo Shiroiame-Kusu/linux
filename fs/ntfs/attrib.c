@@ -16,7 +16,6 @@
  * Copyright (c) 2010 Erik Larsson
  */
 
-#include <linux/string_choices.h>
 #include <linux/writeback.h>
 #include <linux/iomap.h>
 
@@ -1856,7 +1855,7 @@ int ntfs_attr_make_non_resident(struct ntfs_inode *ni, const u32 data_size)
 		if (IS_ERR(rl)) {
 			err = PTR_ERR(rl);
 			ntfs_debug("Failed to allocate cluster%s, error code %i.",
-					str_plural(ntfs_bytes_to_cluster(vol, new_size)),
+					ntfs_bytes_to_cluster(vol, new_size) > 1 ? "s" : "",
 					err);
 			goto folio_err_out;
 		}
@@ -2624,11 +2623,11 @@ int ntfs_attr_add(struct ntfs_inode *ni, __le32 type,
 	struct inode *attr_vi;
 	struct mft_record *ni_mrec;
 
-	ntfs_debug("Entering for inode 0x%llx, attr %x, size %lld.\n",
-			ni->mft_no, type, size);
-
 	if (!ni || size < 0 || type == AT_ATTRIBUTE_LIST)
 		return -EINVAL;
+
+	ntfs_debug("Entering for inode 0x%llx, attr %x, size %lld.\n",
+			(long long) ni->mft_no, type, size);
 
 	if (ni->nr_extents == -1)
 		ni = ni->ext.base_ntfs_ino;

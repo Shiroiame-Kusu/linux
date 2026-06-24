@@ -6,6 +6,7 @@
 
 #include <drm/drm_print.h>
 
+#include "intel_alpm.h"
 #include "intel_crtc.h"
 #include "intel_de.h"
 #include "intel_display_regs.h"
@@ -520,6 +521,7 @@ int intel_vrr_compute_optimized_guardband(struct intel_crtc_state *crtc_state)
 	if (intel_crtc_has_dp_encoder(crtc_state)) {
 		guardband = max(guardband, intel_psr_min_guardband(crtc_state));
 		guardband = max(guardband, intel_dp_sdp_min_guardband(crtc_state, true));
+		guardband = max(guardband, intel_alpm_lobf_min_guardband(crtc_state));
 	}
 
 	return guardband;
@@ -689,7 +691,7 @@ intel_vrr_dcb_reset(const struct intel_crtc_state *old_crtc_state,
 }
 
 static u32 trans_vrr_push(const struct intel_crtc_state *crtc_state,
-				  bool send_push)
+			  bool send_push)
 {
 	struct intel_display *display = to_intel_display(crtc_state);
 	u32 trans_vrr_push = 0;
@@ -701,7 +703,7 @@ static u32 trans_vrr_push(const struct intel_crtc_state *crtc_state,
 	if (send_push)
 		trans_vrr_push |= TRANS_PUSH_SEND;
 
-	if (intel_psr_use_trans_push(crtc_state))
+	if (HAS_PSR_TRANS_PUSH_FRAME_CHANGE(display))
 		trans_vrr_push |= LNL_TRANS_PUSH_PSR_PR_EN;
 
 	return trans_vrr_push;
@@ -722,7 +724,6 @@ void intel_vrr_send_push(struct intel_dsb *dsb,
 	intel_de_write_dsb(display, dsb,
 			   TRANS_PUSH(display, cpu_transcoder),
 			   trans_vrr_push(crtc_state, true));
-
 	if (dsb)
 		intel_dsb_nonpost_end(dsb);
 }

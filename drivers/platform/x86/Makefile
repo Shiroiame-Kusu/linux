@@ -14,6 +14,7 @@ obj-$(CONFIG_NVIDIA_WMI_EC_BACKLIGHT)	+= nvidia-wmi-ec-backlight.o
 obj-$(CONFIG_XIAOMI_WMI)		+= xiaomi-wmi.o
 obj-$(CONFIG_REDMI_WMI)			+= redmi-wmi.o
 obj-$(CONFIG_GIGABYTE_WMI)		+= gigabyte-wmi.o
+obj-$(CONFIG_BITLAND_MIFS_WMI)		+= bitland-mifs-wmi.o
 
 # Acer
 obj-$(CONFIG_ACERHDF)		+= acerhdf.o
@@ -27,6 +28,7 @@ obj-y				+= amd/
 obj-$(CONFIG_ADV_SWBUTTON)	+= adv_swbutton.o
 
 # Apple
+obj-$(CONFIG_MACSMC_ACPI)	+= macsmc-acpi.o
 obj-$(CONFIG_APPLE_GMUX)	+= apple-gmux.o
 
 # ASUS
