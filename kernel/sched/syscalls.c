@@ -1014,13 +1014,11 @@ err_size:
 static void get_params(struct task_struct *p, struct sched_attr *attr, unsigned int flags)
 {
 #ifndef CONFIG_SCHED_ALT
-	if (task_has_dl_policy(p))
-		__getparam_dl(p, attr);
-	else
-#endif
 	if (task_has_dl_policy(p)) {
 		__getparam_dl(p, attr, flags);
-	} else if (task_has_rt_policy(p)) {
+	} else
+#endif
+	if (task_has_rt_policy(p)) {
 		attr->sched_priority = p->rt_priority;
 	} else {
 		attr->sched_nice = task_nice(p);
