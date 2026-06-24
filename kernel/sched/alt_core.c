@@ -2594,6 +2594,24 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 
 		rq = task_rq(p);
 		raw_spin_lock(&rq->lock);
+		if (unlikely(rq != task_rq(p))) {
+			/*
+			 * task_cpu(p) changed in the read->lock window: a
+			 * concurrent lock-free pick/preempt (pick_next_task()'s
+			 * SRQ dequeue, pick_preempt_task(), preempt_on_rq_locked())
+			 * re-homed @p while p->on_rq stayed != 0 -- set_task_cpu()
+			 * does not pass through on_rq==0/MIGRATING. We locked the
+			 * stale rq, which does NOT serialize against the
+			 * block_task() now running under @p's real rq->lock. If we
+			 * proceeded, ttwu_do_wakeup()'s __state=RUNNING would race
+			 * that block_task()'s on_rq=0 and strand @p
+			 * (RUNNING && on_rq==0). Re-read task_rq(p) and retry; this
+			 * is the __task_rq_lock() invariant the preempt branch
+			 * above and __task_modify_lock() already enforce.
+			 */
+			raw_spin_unlock(&rq->lock);
+			continue;
+		}
 		if (task_on_rq_preempt(p)) {
 			raw_spin_unlock(&rq->lock);
 			continue;
