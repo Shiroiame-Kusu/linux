@@ -66,6 +66,7 @@ extern bool dl_task_needs_bw_move(struct task_struct *p,
 extern u64 dl_cookie;
 extern bool dl_bw_visited(int cpu, u64 cookie);
 
+#ifndef CONFIG_SCHED_ALT
 static inline bool dl_server(struct sched_dl_entity *dl_se)
 {
 	return dl_se->dl_server;
@@ -92,5 +93,6 @@ static inline bool dl_is_implicit(struct sched_dl_entity *dl_se)
 {
 	return dl_se->dl_deadline == dl_se->dl_period;
 }
+#endif /* !CONFIG_SCHED_ALT */
 
 #endif /* _LINUX_SCHED_DEADLINE_H */
