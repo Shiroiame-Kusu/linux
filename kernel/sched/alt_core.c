@@ -1343,6 +1343,7 @@ static inline void activate_task(struct task_struct *p, struct sched_run_queue *
 
 				WRITE_ONCE(p->__state, TASK_RUNNING);
 			});
+	sched_trace(p, ST_ACTIVATE);
 	/*
 	 * If in_iowait is set, the code below may not trigger any cpufreq
 	 * utilization updates, so do it here explicitly with the IOWAIT flag
@@ -1507,6 +1508,7 @@ static void block_task(struct rq *rq, struct task_struct *p)
 	 * own it.
 	 */
 	smp_store_release(&p->on_rq, 0);
+	sched_trace(p, ST_BLOCK);
 }
 
 static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
@@ -1930,6 +1932,7 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_PREEMPT);
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
+	sched_trace(p, ST_PREEMPT);
 
 	resched_curr(rq);
 }
@@ -1961,6 +1964,7 @@ void wakeup_modified_task(struct task_struct *p)
 				WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 				ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 			 });
+	sched_trace(p, ST_GRQ_REQUEUE);
 	notify_queued_task(p);
 }
 
@@ -2499,6 +2503,7 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 static inline void ttwu_do_wakeup(struct task_struct *p)
 {
 	WRITE_ONCE(p->__state, TASK_RUNNING);
+	sched_trace(p, ST_TTWU_RUN);
 	trace_sched_wakeup(p);
 }
 
@@ -3110,6 +3115,7 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		 * enqueue, such as ttwu_queue_wakelist().
 		 */
 		WRITE_ONCE(p->__state, TASK_WAKING);
+		sched_trace(p, ST_WAKING);
 
 		/*
 		 * If the owning (remote) CPU is still in the middle of schedule() with
@@ -3663,6 +3669,7 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 			WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
 			ASSERT_EXCLUSIVE_WRITER(prev->on_rq);
 			llist_add(&prev->pq_node, per_cpu_ptr(&preempt_list, cpu));
+			sched_trace(prev, ST_FINISH_PREEMPT);
 		} else {
 			struct rq *trq;
 			struct sched_run_queue *srq = rq_srq(rq);
@@ -3711,6 +3718,33 @@ static DECLARE_DELAYED_WORK(sched_strand_watchdog, sched_strand_watchdog_fn);
 /* Backstop scan interval -- a strand auto-recovers within this bound. */
 #define SCHED_STRAND_WATCHDOG_INTERVAL	(HZ / 10)	/* 100 ms */
 
+/* DIAG: decode a stranded task's transition ring (see sched_trace()). */
+static const char * const sched_trace_name[] = {
+	"-", "BLOCK", "ACTIVATE", "PREEMPT", "WAKING", "TTWU_RUN",
+	"GRQ_REQ", "FIN_PRMPT", "PICK", "SIG_RUN",
+};
+
+static void sched_trace_dump(struct task_struct *p)
+{
+	int idx = atomic_read(&p->strace_idx);
+	int k;
+
+	pr_warn("sched/alt: strand %s/%d transitions (oldest -> newest):\n",
+		p->comm, task_pid_nr(p));
+	for (k = SCHED_TRACE_N - 1; k >= 0; k--) {
+		u64 e = p->strace[(idx - k) & (SCHED_TRACE_N - 1)];
+		unsigned int tag = (e >> 32) & 0xff;
+
+		if (!tag)
+			continue;
+		pr_warn("    ts=%010u %-9s on_rq=%llu state=0x%04llx\n",
+			(unsigned int)(e & 0xffffffffULL),
+			tag < ARRAY_SIZE(sched_trace_name) ?
+				sched_trace_name[tag] : "?",
+			(e >> 40) & 0xffULL, (e >> 48) & 0xffffULL);
+	}
+}
+
 static void sched_strand_watchdog_fn(struct work_struct *work)
 {
 	/* DIAG: rate-limit the strand stack dumps used to localize the producer. */
@@ -3745,6 +3779,7 @@ static void sched_strand_watchdog_fn(struct work_struct *work)
 					p->normal_prio);
 #endif
 				sched_show_task(p);
+				sched_trace_dump(p);
 			}
 			wake_up_process(p);
 		}
@@ -4922,6 +4957,7 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 		WRITE_ONCE(preempt->__sched_prio, -1);
 		WRITE_ONCE(preempt->on_rq, TASK_ON_RQ_QUEUED);
 		ASSERT_EXCLUSIVE_WRITER(preempt->on_rq);
+		sched_trace(preempt, ST_PICK);
 
 		if (task_cpu(preempt) != cpu)
 			set_task_cpu(preempt, cpu);
@@ -5149,6 +5185,7 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 	if (signal_pending_state(task_state, p)) {
 		WRITE_ONCE(p->__state, TASK_RUNNING);
 		*task_state_p = TASK_RUNNING;
+		sched_trace(p, ST_SIGNAL_RUN);
 		return false;
 	}
 	p->sched_contributes_to_load =
