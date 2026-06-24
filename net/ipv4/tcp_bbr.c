@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* Bottleneck Bandwidth and RTT (BBR) congestion control
  *
  * BBR congestion control computes the sending rate based on the delivery
@@ -295,10 +296,27 @@ static void bbr_set_pacing_rate(struct sock *sk, u32 bw, int gain)
 		WRITE_ONCE(sk->sk_pacing_rate, rate);
 }
 
-/* Floor on segments-per-TSO that BBR wants when pacing fast enough. */
-static u32 bbr_min_tso_segs(struct sock *sk)
+/* override sysctl_tcp_min_tso_segs */
+__bpf_kfunc static u32 bbr_min_tso_segs(struct sock *sk)
 {
 	return READ_ONCE(sk->sk_pacing_rate) < (bbr_min_tso_rate >> 3) ? 1 : 2;
+}
+
+__bpf_kfunc static u32 bbr_tso_segs(struct sock *sk, unsigned int mss_now)
+{
+	unsigned long bytes;
+	u32 r;
+
+	bytes = READ_ONCE(sk->sk_pacing_rate) >> READ_ONCE(sk->sk_pacing_shift);
+
+	r = tcp_min_rtt(tcp_sk(sk)) >>
+	    READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tso_rtt_log);
+	if (r < BITS_PER_TYPE(sk->sk_gso_max_size))
+		bytes += sk->sk_gso_max_size >> r;
+
+	bytes = min_t(unsigned long, bytes, sk->sk_gso_max_size);
+
+	return max_t(u32, bytes / mss_now, bbr_min_tso_segs(sk));
 }
 
 static u32 bbr_tso_segs_goal(struct sock *sk)
@@ -317,29 +335,6 @@ static u32 bbr_tso_segs_goal(struct sock *sk)
 	return min(segs, 0x7FU);
 }
 
-/* Return the target number of segments in each TSO skb.  Replaces the
- * removed .min_tso_segs hook: tcp_tso_segs() now expects the CA op to
- * return the final segment target rather than a minimum.  Mirrors the
- * core tcp_tso_autosize() that used to wrap the old .min_tso_segs floor,
- * so driver sk_gso_max_size and mss_now are honored.
- */
-__bpf_kfunc static u32 bbr_tso_segs(struct sock *sk, unsigned int mss_now)
-{
-	unsigned long bytes;
-	u32 r;
-
-	bytes = READ_ONCE(sk->sk_pacing_rate) >> READ_ONCE(sk->sk_pacing_shift);
-
-	r = tcp_min_rtt(tcp_sk(sk)) >>
-	    READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_tso_rtt_log);
-	if (r < BITS_PER_TYPE(sk->sk_gso_max_size))
-		bytes += sk->sk_gso_max_size >> r;
-
-	bytes = min_t(unsigned long, bytes, sk->sk_gso_max_size);
-
-	return max_t(u32, bytes / mss_now, bbr_min_tso_segs(sk));
-}
-
 /* Save "last known good" cwnd so we can restore it after losses or PROBE_RTT */
 static void bbr_save_cwnd(struct sock *sk)
 {
@@ -352,12 +347,12 @@ static void bbr_save_cwnd(struct sock *sk)
 		bbr->prior_cwnd = max(bbr->prior_cwnd, tcp_snd_cwnd(tp));
 }
 
-__bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
+__bpf_kfunc static void bbr_cwnd_event_tx_start(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
 
-	if (event == CA_EVENT_TX_START && tp->app_limited) {
+	if (tp->app_limited) {
 		bbr->idle_restart = 1;
 		bbr->ack_epoch_mstamp = tp->tcp_mstamp;
 		bbr->ack_epoch_acked = 0;
@@ -1171,7 +1166,7 @@ static struct tcp_congestion_ops tcp_bbr_cong_ops __read_mostly = {
 	.cong_control	= bbr_main,
 	.sndbuf_expand	= bbr_sndbuf_expand,
 	.undo_cwnd	= bbr_undo_cwnd,
-	.cwnd_event	= bbr_cwnd_event,
+	.cwnd_event_tx_start	= bbr_cwnd_event_tx_start,
 	.ssthresh	= bbr_ssthresh,
 	.tso_segs	= bbr_tso_segs,
 	.get_info	= bbr_get_info,
@@ -1183,9 +1178,9 @@ BTF_ID_FLAGS(func, bbr_init)
 BTF_ID_FLAGS(func, bbr_main)
 BTF_ID_FLAGS(func, bbr_sndbuf_expand)
 BTF_ID_FLAGS(func, bbr_undo_cwnd)
-BTF_ID_FLAGS(func, bbr_cwnd_event)
+BTF_ID_FLAGS(func, bbr_cwnd_event_tx_start)
 BTF_ID_FLAGS(func, bbr_ssthresh)
-BTF_ID_FLAGS(func, bbr_tso_segs)
+BTF_ID_FLAGS(func, bbr_min_tso_segs)
 BTF_ID_FLAGS(func, bbr_set_state)
 BTF_KFUNCS_END(tcp_bbr_check_kfunc_ids)
 

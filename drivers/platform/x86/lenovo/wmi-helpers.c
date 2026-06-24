@@ -17,9 +17,9 @@
  */
 
 #include <linux/acpi.h>
+#include <linux/cleanup.h>
 #include <linux/debugfs.h>
 #include <linux/device.h>
-#include <linux/cleanup.h>
 #include <linux/errno.h>
 #include <linux/export.h>
 #include <linux/module.h>

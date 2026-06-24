@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0
 /* BBR (Bottleneck Bandwidth and RTT) congestion control
  *
  * BBR is a model-based congestion control algorithm that aims for low queues,
@@ -168,7 +169,7 @@ struct bbr {
 		ecn_in_round:1,	       /* ECN marked in this round trip? */
 		ack_phase:3,	       /* bbr_ack_phase: meaning of ACKs */
 		loss_events_in_round:4,/* losses in STARTUP round */
-		initialized:1;	       /* has bbr3_init() been called? */
+		initialized:1;	       /* has bbr_init() been called? */
 	u32	alpha_last_delivered;	 /* tp->delivered    at alpha update */
 	u32	alpha_last_delivered_ce; /* tp->delivered_ce at alpha update */
 
@@ -512,12 +513,12 @@ static u32 bbr_tso_segs_generic(struct sock *sk, unsigned int mss_now,
 }
 
 /* Custom tcp_tso_autosize() for BBR, used at transmit time to cap skb size. */
-__bpf_kfunc static u32 bbr3_tso_segs(struct sock *sk, unsigned int mss_now)
+__bpf_kfunc static u32 bbr_tso_segs(struct sock *sk, unsigned int mss_now)
 {
 	return bbr_tso_segs_generic(sk, mss_now, sk->sk_gso_max_size);
 }
 
-/* Like bbr3_tso_segs(), using mss_cache, ignoring driver's sk_gso_max_size. */
+/* Like bbr_tso_segs(), using mss_cache, ignoring driver's sk_gso_max_size. */
 static u32 bbr_tso_segs_goal(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -537,14 +538,29 @@ static void bbr_save_cwnd(struct sock *sk)
 		bbr->prior_cwnd = max(bbr->prior_cwnd, tcp_snd_cwnd(tp));
 }
 
-__bpf_kfunc static void bbr3_cwnd_event(struct sock *sk, enum tcp_ca_event event)
+__bpf_kfunc static void bbr_cwnd_event(struct sock *sk, enum tcp_ca_event event)
+{
+	struct bbr *bbr = inet_csk_ca(sk);
+
+	if ((event == CA_EVENT_ECN_IS_CE ||
+	     event == CA_EVENT_ECN_NO_CE) &&
+	    bbr_can_use_ecn(sk) &&
+	    bbr_param(sk, precise_ece_ack)) {
+		u32 state = bbr->ce_state;
+		dctcp_ece_ack_update(sk, event, &bbr->prior_rcv_nxt, &state);
+		bbr->ce_state = state;
+	} else if (event == CA_EVENT_TLP_RECOVERY &&
+		   bbr_param(sk, loss_probe_recovery)) {
+		bbr_run_loss_probe_recovery(sk);
+	}
+}
+
+__bpf_kfunc static void bbr_cwnd_event_tx_start(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
 
-	if (event == CA_EVENT_TX_START) {
-		if (!tp->app_limited)
-			return;
+	if (tp->app_limited) {
 		bbr->idle_restart = 1;
 		bbr->ack_epoch_mstamp = tp->tcp_mstamp;
 		bbr->ack_epoch_acked = 0;
@@ -555,16 +571,6 @@ __bpf_kfunc static void bbr3_cwnd_event(struct sock *sk, enum tcp_ca_event event
 			bbr_set_pacing_rate(sk, bbr_bw(sk), BBR_UNIT);
 		else if (bbr->mode == BBR_PROBE_RTT)
 			bbr_check_probe_rtt_done(sk);
-	} else if ((event == CA_EVENT_ECN_IS_CE ||
-		    event == CA_EVENT_ECN_NO_CE) &&
-		   bbr_can_use_ecn(sk) &&
-		   bbr_param(sk, precise_ece_ack)) {
-		u32 state = bbr->ce_state;
-		dctcp_ece_ack_update(sk, event, &bbr->prior_rcv_nxt, &state);
-		bbr->ce_state = state;
-	} else if (event == CA_EVENT_TLP_RECOVERY &&
-		   bbr_param(sk, loss_probe_recovery)) {
-		bbr_run_loss_probe_recovery(sk);
 	}
 }
 
@@ -981,7 +987,7 @@ static void bbr_update_gains(struct sock *sk)
 	}
 }
 
-__bpf_kfunc static u32 bbr3_sndbuf_expand(struct sock *sk)
+__bpf_kfunc static u32 bbr_sndbuf_expand(struct sock *sk)
 {
 	/* Provision 3 * cwnd since BBR may slow-start even during recovery. */
 	return 3;
@@ -2098,7 +2104,7 @@ static bool bbr_run_fast_path(struct sock *sk, bool *update_model,
 	return false;
 }
 
-__bpf_kfunc static void bbr3_main(struct sock *sk, u32 ack, int flag,
+__bpf_kfunc static void bbr_main(struct sock *sk, u32 ack, int flag,
 				 const struct rate_sample *rs)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -2140,7 +2146,7 @@ out:
 	bbr->ecn_in_cycle  |= rs->delivered_ce > 0;
 }
 
-__bpf_kfunc static void bbr3_init(struct sock *sk)
+__bpf_kfunc static void bbr_init(struct sock *sk)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
@@ -2149,7 +2155,7 @@ __bpf_kfunc static void bbr3_init(struct sock *sk)
 
 	bbr->init_cwnd = min(0x7FU, tcp_snd_cwnd(tp));
 	bbr->prior_cwnd = tp->prior_cwnd;
-	tp->snd_ssthresh = TCP_INFINITE_SSTHRESH;
+	WRITE_ONCE(tp->snd_ssthresh, TCP_INFINITE_SSTHRESH);
 	bbr->next_rtt_delivered = tp->delivered;
 	bbr->prev_ca_state = TCP_CA_Open;
 
@@ -2238,7 +2244,7 @@ static void bbr_note_loss(struct sock *sk)
 }
 
 /* Core TCP stack informs us that the given skb was just marked lost. */
-__bpf_kfunc static void bbr3_skb_marked_lost(struct sock *sk,
+__bpf_kfunc static void bbr_skb_marked_lost(struct sock *sk,
 					    const struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -2287,7 +2293,7 @@ static void bbr_run_loss_probe_recovery(struct sock *sk)
 }
 
 /* Revert short-term model if current loss recovery event was spurious. */
-__bpf_kfunc static u32 bbr3_undo_cwnd(struct sock *sk)
+__bpf_kfunc static u32 bbr_undo_cwnd(struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 
@@ -2303,7 +2309,7 @@ __bpf_kfunc static u32 bbr3_undo_cwnd(struct sock *sk)
 }
 
 /* Entering loss recovery, so save state for when we undo recovery. */
-__bpf_kfunc static u32 bbr3_ssthresh(struct sock *sk)
+__bpf_kfunc static u32 bbr_ssthresh(struct sock *sk)
 {
 	struct bbr *bbr = inet_csk_ca(sk);
 
@@ -2377,7 +2383,7 @@ static size_t bbr_get_info(struct sock *sk, u32 ext, int *attr,
 	return 0;
 }
 
-__bpf_kfunc static void bbr3_set_state(struct sock *sk, u8 new_state)
+__bpf_kfunc static void bbr_set_state(struct sock *sk, u8 new_state)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
 	struct bbr *bbr = inet_csk_ca(sk);
@@ -2405,58 +2411,60 @@ __bpf_kfunc static void bbr3_set_state(struct sock *sk, u8 new_state)
 }
 
 
-static struct tcp_congestion_ops tcp_bbr3_cong_ops __read_mostly = {
+static struct tcp_congestion_ops tcp_bbr_cong_ops __read_mostly = {
 	.flags		= TCP_CONG_NON_RESTRICTED | TCP_CONG_WANTS_CE_EVENTS,
-	.name		= "bbr3",
+	.name		= "bbr",
 	.owner		= THIS_MODULE,
-	.init		= bbr3_init,
-	.cong_control	= bbr3_main,
-	.sndbuf_expand	= bbr3_sndbuf_expand,
-	.skb_marked_lost = bbr3_skb_marked_lost,
-	.undo_cwnd	= bbr3_undo_cwnd,
-	.cwnd_event	= bbr3_cwnd_event,
-	.ssthresh	= bbr3_ssthresh,
-	.tso_segs	= bbr3_tso_segs,
+	.init		= bbr_init,
+	.cong_control	= bbr_main,
+	.sndbuf_expand	= bbr_sndbuf_expand,
+	.skb_marked_lost = bbr_skb_marked_lost,
+	.undo_cwnd	= bbr_undo_cwnd,
+	.cwnd_event	= bbr_cwnd_event,
+	.cwnd_event_tx_start	= bbr_cwnd_event_tx_start,
+	.ssthresh	= bbr_ssthresh,
+	.tso_segs	= bbr_tso_segs,
 	.get_info	= bbr_get_info,
-	.set_state	= bbr3_set_state,
+	.set_state	= bbr_set_state,
 };
 
-BTF_KFUNCS_START(tcp_bbr3_check_kfunc_ids)
-BTF_ID_FLAGS(func, bbr3_init)
-BTF_ID_FLAGS(func, bbr3_main)
-BTF_ID_FLAGS(func, bbr3_sndbuf_expand)
-BTF_ID_FLAGS(func, bbr3_skb_marked_lost)
-BTF_ID_FLAGS(func, bbr3_undo_cwnd)
-BTF_ID_FLAGS(func, bbr3_cwnd_event)
-BTF_ID_FLAGS(func, bbr3_ssthresh)
-BTF_ID_FLAGS(func, bbr3_tso_segs)
-BTF_ID_FLAGS(func, bbr3_set_state)
-BTF_KFUNCS_END(tcp_bbr3_check_kfunc_ids)
+BTF_KFUNCS_START(tcp_bbr_check_kfunc_ids)
+BTF_ID_FLAGS(func, bbr_init)
+BTF_ID_FLAGS(func, bbr_main)
+BTF_ID_FLAGS(func, bbr_sndbuf_expand)
+BTF_ID_FLAGS(func, bbr_skb_marked_lost)
+BTF_ID_FLAGS(func, bbr_undo_cwnd)
+BTF_ID_FLAGS(func, bbr_cwnd_event)
+BTF_ID_FLAGS(func, bbr_cwnd_event_tx_start)
+BTF_ID_FLAGS(func, bbr_ssthresh)
+BTF_ID_FLAGS(func, bbr_tso_segs)
+BTF_ID_FLAGS(func, bbr_set_state)
+BTF_KFUNCS_END(tcp_bbr_check_kfunc_ids)
 
-static const struct btf_kfunc_id_set tcp_bbr3_kfunc_set = {
+static const struct btf_kfunc_id_set tcp_bbr_kfunc_set = {
 	.owner = THIS_MODULE,
-	.set   = &tcp_bbr3_check_kfunc_ids,
+	.set   = &tcp_bbr_check_kfunc_ids,
 };
 
-static int __init bbr3_register(void)
+static int __init bbr_register(void)
 {
 	int ret;
 
 	BUILD_BUG_ON(sizeof(struct bbr) > ICSK_CA_PRIV_SIZE);
 
-	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &tcp_bbr3_kfunc_set);
+	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &tcp_bbr_kfunc_set);
 	if (ret < 0)
 		return ret;
-	return tcp_register_congestion_control(&tcp_bbr3_cong_ops);
+	return tcp_register_congestion_control(&tcp_bbr_cong_ops);
 }
 
-static void __exit bbr3_unregister(void)
+static void __exit bbr_unregister(void)
 {
-	tcp_unregister_congestion_control(&tcp_bbr3_cong_ops);
+	tcp_unregister_congestion_control(&tcp_bbr_cong_ops);
 }
 
-module_init(bbr3_register);
-module_exit(bbr3_unregister);
+module_init(bbr_register);
+module_exit(bbr_unregister);
 
 MODULE_AUTHOR("Van Jacobson <vanj@google.com>");
 MODULE_AUTHOR("Neal Cardwell <ncardwell@google.com>");
@@ -2469,6 +2477,5 @@ MODULE_AUTHOR("Arjun Roy <arjunroy@google.com>");
 MODULE_AUTHOR("David Morley <morleyd@google.com>");
 
 MODULE_LICENSE("Dual BSD/GPL");
-MODULE_DESCRIPTION("TCP BBRv3 (Bottleneck Bandwidth and RTT)");
-MODULE_ALIAS("tcp_bbr3");
+MODULE_DESCRIPTION("TCP BBR (Bottleneck Bandwidth and RTT)");
 MODULE_VERSION(__stringify(BBR_VERSION));

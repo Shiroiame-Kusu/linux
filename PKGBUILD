@@ -2,8 +2,8 @@
 # Original: CachyOS linux-cachyos
 _pkgsuffix="cachyos-lfbmq-hakuu-tlto-expr"
 pkgbase="linux-$_pkgsuffix"
-_major=7.0
-_minor=10
+_major=7.1
+_minor=1
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
