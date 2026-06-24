@@ -1234,7 +1234,7 @@ enum {
 	HRTICK_SCHED_REARM_HRTIMER	= BIT(3)
 };
 
-static void hrtick_clear(struct rq *rq)
+static void __used hrtick_clear(struct rq *rq)
 {
 	if (hrtimer_active(&rq->hrtick_timer))
 		hrtimer_cancel(&rq->hrtick_timer);
@@ -5357,9 +5357,6 @@ static void __sched notrace __schedule(int sched_mode)
 	rq->block = false;
 
 	schedule_debug(prev, preempt);
-
-	/* by passing sched_feat(HRTICK) checking which Alt schedule FW doesn't support */
-	hrtick_clear(rq);
 
 	klp_sched_try_switch(prev);
 
