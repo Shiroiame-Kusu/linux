@@ -884,6 +884,9 @@ struct task_struct {
 #endif /* CONFIG_SCHED_PDS */
 	/* sched_clock time spent running */
 	u64				sched_time;
+	/* DIAG: lost-wakeup strand transition trace; revert with the diagnostics */
+	u64				strace[16];
+	atomic_t			strace_idx;
 #else /* !CONFIG_SCHED_ALT */
 	struct sched_entity		se;
 	struct sched_rt_entity		rt;
