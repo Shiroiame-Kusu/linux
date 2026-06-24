@@ -14,42 +14,8 @@
 #include <trace/events/sched.h>
 
 #include "../workqueue_internal.h"
-#include <linux/sched/clock.h>
 
 #include "cpupri.h"
-
-/*
- * DIAG: lost-wakeup strand transition trace. Record (timestamp, site tag,
- * on_rq, low __state) into a per-task ring at every on_rq / __state=RUNNING
- * write, so that when the watchdog catches a RUNNING && on_rq==0 strand we can
- * replay the exact order of operations that produced it. Revert with the rest
- * of the diagnostics once the producing race is found.
- */
-#define SCHED_TRACE_N	16
-enum sched_trace_tag {
-	ST_BLOCK = 1,		/* block_task(): on_rq -> 0 */
-	ST_ACTIVATE,		/* activate_task(): on_rq=QUEUED, __state=RUNNING */
-	ST_PREEMPT,		/* preempt_on_rq_locked(): on_rq=PREEMPT */
-	ST_WAKING,		/* try_to_wake_up(): __state=WAKING */
-	ST_TTWU_RUN,		/* ttwu_do_wakeup(): __state=RUNNING (on_rq!=0) */
-	ST_GRQ_REQUEUE,		/* wakeup_modified_task(): grq enqueue, on_rq=QUEUED */
-	ST_FINISH_PREEMPT,	/* finish_task(): preempted prev -> preempt_list */
-	ST_PICK,		/* pick_preempt_task(): chosen, on_rq=QUEUED */
-	ST_SIGNAL_RUN,		/* try_to_block_task(): signal -> __state=RUNNING */
-};
-
-static inline void sched_trace(struct task_struct *p, unsigned int tag)
-{
-	unsigned int i = (unsigned int)atomic_inc_return(&p->strace_idx) &
-			 (SCHED_TRACE_N - 1);
-	u64 onrq = READ_ONCE(p->on_rq);
-	u64 st = READ_ONCE(p->__state);
-
-	p->strace[i] = (sched_clock() & 0xffffffffULL) |
-		       ((u64)(tag & 0xff) << 32) |
-		       ((onrq & 0xffULL) << 40) |
-		       ((st & 0xffffULL) << 48);
-}
 
 #ifdef CONFIG_CGROUP_SCHED
 /* task group related information */
