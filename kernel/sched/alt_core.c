@@ -1411,7 +1411,6 @@ static inline void activate_task(struct task_struct *p, struct sched_run_queue *
 
 				WRITE_ONCE(p->__state, TASK_RUNNING);
 			});
-	sched_trace(p, ST_ACTIVATE);
 	/*
 	 * If in_iowait is set, the code below may not trigger any cpufreq
 	 * utilization updates, so do it here explicitly with the IOWAIT flag
@@ -1520,13 +1519,6 @@ static __always_inline void notify_queued_task(struct task_struct *p)
 	if (wakeup_rq_kick(p))
 		return;
 
-	/* DIAG: queued to grq, kicked nobody -- but idle CPUs intersect affinity */
-	if (cpumask_intersects(p->cpus_ptr, sched_idle_mask))
-		pr_warn_ratelimited("sched/alt: queued %s/%d not kicked; idle CPUs exist (affinity=%*pbl idle=%*pbl)\n",
-				    p->comm, p->pid,
-				    cpumask_pr_args(p->cpus_ptr),
-				    cpumask_pr_args(sched_idle_mask));
-
 	cpu = queued_task_tick_cpu(p);
 	update_queued_task_tick_dependency(cpu);
 }
@@ -1576,7 +1568,6 @@ static void block_task(struct rq *rq, struct task_struct *p)
 	 * own it.
 	 */
 	smp_store_release(&p->on_rq, 0);
-	sched_trace(p, ST_BLOCK);
 }
 
 static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
@@ -2000,7 +1991,6 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
 	WRITE_ONCE(p->on_rq, TASK_ON_RQ_PREEMPT);
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
-	sched_trace(p, ST_PREEMPT);
 
 	resched_curr(rq);
 }
@@ -2032,7 +2022,6 @@ void wakeup_modified_task(struct task_struct *p)
 				WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 				ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 			 });
-	sched_trace(p, ST_GRQ_REQUEUE);
 	notify_queued_task(p);
 }
 
@@ -2571,7 +2560,6 @@ ttwu_stat(struct task_struct *p, int cpu, int wake_flags)
 static inline void ttwu_do_wakeup(struct task_struct *p)
 {
 	WRITE_ONCE(p->__state, TASK_RUNNING);
-	sched_trace(p, ST_TTWU_RUN);
 	trace_sched_wakeup(p);
 }
 
@@ -3133,11 +3121,8 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 			if (READ_ONCE(p->__state) == TASK_RUNNING &&
 			    READ_ONCE(p->on_rq) == 0 &&
 			    !READ_ONCE(p->on_cpu)) {
-				pr_warn_ratelimited("sched/alt: lost-wakeup strand: recovering %s/%d, waker %s/%d, wake_cpu=%d\n",
-						    p->comm, p->pid, current->comm,
-						    current->pid, READ_ONCE(p->wake_cpu));
 				success = 1;
-				/* fall through into the normal wakeup path */
+				/* silent backstop: re-enqueue via the normal path */
 			} else {
 				break;
 			}
@@ -3203,7 +3188,6 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 		 * enqueue, such as ttwu_queue_wakelist().
 		 */
 		WRITE_ONCE(p->__state, TASK_WAKING);
-		sched_trace(p, ST_WAKING);
 
 		/*
 		 * If the owning (remote) CPU is still in the middle of schedule() with
@@ -3757,7 +3741,6 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 			WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
 			ASSERT_EXCLUSIVE_WRITER(prev->on_rq);
 			llist_add(&prev->pq_node, per_cpu_ptr(&preempt_list, cpu));
-			sched_trace(prev, ST_FINISH_PREEMPT);
 		} else {
 			struct rq *trq;
 			struct sched_run_queue *srq = rq_srq(rq);
@@ -3782,122 +3765,6 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 
 	sched_update_tick_dependency(rq);
 }
-
-/*
- * Lost-wakeup strand watchdog.
- *
- * try_to_wake_up()'s recovery re-activates a task left TASK_RUNNING while off
- * every runqueue (on_rq == 0) and off-CPU -- but only when a wakeup is actually
- * attempted on it. A task stranded that way which nobody tries to wake (a
- * runnable task that merely needs to be put back on a runqueue) is otherwise
- * stuck forever while CPUs sit idle (observed: a game worker strands on_rq==0/
- * __state==RUNNING while 22 CPUs are idle and the render thread spins on it).
- *
- * Periodically find such tasks and poke a wakeup. It routes through the
- * (reviewed) try_to_wake_up() recovery gate, which re-validates the state under
- * p->pi_lock and re-enqueues -- so a lockless false positive observed here is a
- * harmless no-op there. The gate's own pr_warn reports each recovery, with
- * waker == this kworker identifying it as a no-wakeup strand. This is a backstop
- * for the (still unlocated) producer race, not a fix for it.
- */
-static void sched_strand_watchdog_fn(struct work_struct *work);
-static DECLARE_DELAYED_WORK(sched_strand_watchdog, sched_strand_watchdog_fn);
-
-/* Backstop scan interval -- a strand auto-recovers within this bound. */
-#define SCHED_STRAND_WATCHDOG_INTERVAL	(HZ / 10)	/* 100 ms */
-
-/* DIAG: decode a stranded task's transition ring (see sched_trace()). */
-static const char * const sched_trace_name[] = {
-	"-", "BLOCK", "ACTIVATE", "PREEMPT", "WAKING", "TTWU_RUN",
-	"GRQ_REQ", "FIN_PRMPT", "PICK", "SIG_RUN",
-};
-
-static void sched_trace_dump(struct task_struct *p)
-{
-	int idx = atomic_read(&p->strace_idx);
-	int k;
-
-	pr_warn("sched/alt: strand %s/%d transitions (oldest -> newest):\n",
-		p->comm, task_pid_nr(p));
-	for (k = SCHED_TRACE_N - 1; k >= 0; k--) {
-		u64 e = p->strace[(idx - k) & (SCHED_TRACE_N - 1)];
-		unsigned int tag = (e >> 32) & 0xff;
-
-		if (!tag)
-			continue;
-		pr_warn("    ts=%010u %-9s on_rq=%llu state=0x%04llx\n",
-			(unsigned int)(e & 0xffffffffULL),
-			tag < ARRAY_SIZE(sched_trace_name) ?
-				sched_trace_name[tag] : "?",
-			(e >> 40) & 0xffULL, (e >> 48) & 0xffffULL);
-	}
-}
-
-static void sched_strand_watchdog_fn(struct work_struct *work)
-{
-	/* DIAG: rate-limit the strand stack dumps used to localize the producer. */
-	static DEFINE_RATELIMIT_STATE(strand_dump_rs, 5 * HZ, 3);
-	struct task_struct *g, *p;
-
-	rcu_read_lock();
-	for_each_process_thread(g, p) {
-		bool stranded = false;
-
-		/* Cheap lockless pre-filter; re-validated under pi_lock below. */
-		if (READ_ONCE(p->__state) != TASK_RUNNING ||
-		    READ_ONCE(p->on_cpu) ||
-		    READ_ONCE(p->on_rq) != 0)
-			continue;
-
-		/*
-		 * Re-validate under pi_lock for a CONSISTENT snapshot. A waker
-		 * holds p->pi_lock across the whole wakeup, including the brief
-		 * window where wakeup_preempt_on_rq() has set __state=RUNNING
-		 * but preempt_on_rq_locked() has not yet set on_rq. Taking
-		 * pi_lock serializes against that, so a task merely mid-wakeup
-		 * (or a torn lockless read above) is no longer RUNNING &&
-		 * on_rq==0 here -- only a genuine strand survives. This is the
-		 * same invariant the try_to_wake_up() recovery gate enforces.
-		 * pi_lock is released before wake_up_process() (which retakes
-		 * it) to avoid self-deadlock.
-		 */
-		scoped_guard(raw_spinlock_irqsave, &p->pi_lock) {
-			stranded = (READ_ONCE(p->__state) == TASK_RUNNING &&
-				    !READ_ONCE(p->on_cpu) &&
-				    READ_ONCE(p->on_rq) == 0);
-		}
-		if (!stranded)
-			continue;
-
-		if (__ratelimit(&strand_dump_rs)) {
-#ifdef CONFIG_RT_MUTEXES
-			pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d pi_blocked=%d sched_rt_mutex=%u\n",
-				p->comm, task_pid_nr(p), p->prio,
-				p->normal_prio, !!p->pi_blocked_on,
-				p->sched_rt_mutex);
-#else
-			pr_warn("sched/alt: strand %s/%d prio=%d normal_prio=%d\n",
-				p->comm, task_pid_nr(p), p->prio,
-				p->normal_prio);
-#endif
-			sched_show_task(p);
-			sched_trace_dump(p);
-		}
-		wake_up_process(p);
-	}
-	rcu_read_unlock();
-
-	schedule_delayed_work(&sched_strand_watchdog,
-			      SCHED_STRAND_WATCHDOG_INTERVAL);
-}
-
-static int __init sched_strand_watchdog_init(void)
-{
-	schedule_delayed_work(&sched_strand_watchdog,
-			      SCHED_STRAND_WATCHDOG_INTERVAL);
-	return 0;
-}
-late_initcall(sched_strand_watchdog_init);
 
 static void do_balance_callbacks(struct rq *rq, struct balance_callback *head)
 {
@@ -4527,21 +4394,15 @@ void sched_tick(void)
 		resched_latency = cpu_resched_latency(rq);
 
 	/*
-	 * DIAG: catch a lost preempt-list wakeup. A task parked to this CPU's
-	 * preempt_list relies on this CPU re-entering __schedule(); if the kick
-	 * was dropped it strands on neither grq nor any path pick_next_task()/
-	 * wakeup_srq_task() scan. A non-empty preempt_list keeps idle_rq() false
-	 * so this CPU cannot NOHZ-stop its tick -- meaning a *local* check each
-	 * tick is sufficient (no cross-CPU sweep needed). If we are idle with a
-	 * non-empty list and no resched pending, that is the strand: report and
-	 * force a reschedule to recover. O(1), local cacheline only.
+	 * Backstop: a task on this CPU's preempt_list relies on the CPU
+	 * re-entering __schedule(). A non-empty preempt_list keeps idle_rq()
+	 * false so the CPU cannot NOHZ-stop its tick, so a local per-tick
+	 * check suffices: if idle with a non-empty list and no resched
+	 * pending, force one. O(1), local cacheline only.
 	 */
 	if (rq->curr == rq->idle && !is_preempt_list_empty(cpu) &&
-	    !test_tsk_need_resched(rq->idle)) {
-		pr_warn_ratelimited("sched/alt: TICK cpu %d idle, non-empty preempt_list, no resched -> forcing\n",
-				    cpu);
+	    !test_tsk_need_resched(rq->idle))
 		resched_curr(rq);
-	}
 
 	raw_spin_unlock(&rq->lock);
 
@@ -5059,7 +4920,6 @@ static __always_inline struct task_struct *pick_preempt_task(const int cpu, int 
 		WRITE_ONCE(preempt->__sched_prio, -1);
 		WRITE_ONCE(preempt->on_rq, TASK_ON_RQ_QUEUED);
 		ASSERT_EXCLUSIVE_WRITER(preempt->on_rq);
-		sched_trace(preempt, ST_PICK);
 
 		if (task_cpu(preempt) != cpu)
 			set_task_cpu(preempt, cpu);
@@ -5078,7 +4938,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 {
 	struct sched_run_queue *srq = cpu_srq(cpu);
 	int idx, kick_cpu = nr_cpu_ids;
-	int strand_pid = -1, strand_idx = -1;	/* strand_idx drives the re-pick; pid is DIAG */
+	int strand_idx = -1;	/* bucket of a task runnable on @cpu; drives the re-pick */
 
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		struct llist_head *head = &srq->_head[idx];
@@ -5108,10 +4968,8 @@ static __always_inline int wakeup_srq_task(const int cpu)
 			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
 				continue;
 
-			if (strand_idx < 0 && is_cpu_allowed(p, cpu)) {
-				strand_idx = idx;	/* bucket of a task runnable on @cpu */
-				strand_pid = p->pid;	/* DIAG */
-			}
+			if (strand_idx < 0 && is_cpu_allowed(p, cpu))
+				strand_idx = idx;
 
 			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
 				if (i == cpu || !is_cpu_allowed(p, i))
@@ -5129,14 +4987,6 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		if (kick_cpu < nr_cpu_ids)
 			break;
 	}
-
-	/*
-	 * DIAG: a grq task runnable on @cpu found no cpu to kick at go-idle; the
-	 * caller re-picks it (a7c6f497). Keep this tracer until that path ships.
-	 */
-	if (strand_pid >= 0 && kick_cpu >= nr_cpu_ids)
-		pr_warn_ratelimited("sched/alt: cpu %d goidle, pid %d bucket=%d, no cpu kicked\n",
-				    cpu, strand_pid, strand_idx);
 
 	if (kick_cpu < nr_cpu_ids)
 		kick_preempt_cpu(kick_cpu);
@@ -5287,7 +5137,6 @@ static bool try_to_block_task(struct rq *rq, struct task_struct *p,
 	if (signal_pending_state(task_state, p)) {
 		WRITE_ONCE(p->__state, TASK_RUNNING);
 		*task_state_p = TASK_RUNNING;
-		sched_trace(p, ST_SIGNAL_RUN);
 		return false;
 	}
 	p->sched_contributes_to_load =
