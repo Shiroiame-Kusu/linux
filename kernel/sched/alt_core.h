@@ -114,7 +114,16 @@ bool sched_llist_del(struct llist_node **first, struct llist_node *target,
 		}
 	}
 
-	WARN_ONCE(!found, "sched/alt: llist_del() target should be in list\n");
+	/*
+	 * !found is a legitimate, self-healing race, not a bug. SRQ_ENQUEUE_TASK()
+	 * publishes p->__sched_prio (and on_rq=QUEUED) before its lock-free
+	 * llist_add(), so a concurrent __task_modify_lock() dequeuer holding
+	 * _lock[idx] can observe the membership token while pq_node is not yet
+	 * linked. SRQ_DEQUEUE_TASK() then re-merges and returns false, and every
+	 * caller (__task_modify_lock / task_access_lock) retries until the enqueue
+	 * is visible. The reverse store order would instead leave pq_node linked
+	 * with __sched_prio==-1, routing dequeuers to the rq path -- worse.
+	 */
 	return found;
 }
 
