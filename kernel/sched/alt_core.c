@@ -4948,11 +4948,22 @@ static __always_inline int wakeup_srq_task(const int cpu)
 
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		struct llist_head *head = &srq->_head[idx];
-		struct llist_node *entry, *first, *last = NULL;
+		struct llist_node *entry, *first;
 		raw_spinlock_t *lock = &srq->_lock[idx];
 
 		raw_spin_lock(lock);
-		first = llist_del_all(head);
+		/*
+		 * Read-only scan of the live bucket. We hold _lock[idx], so no
+		 * dequeue or relink can run concurrently -- every remover
+		 * (pick_next_task()'s PQ_PICK_TASK, __task_modify_lock()'s
+		 * SRQ_DEQUEUE_TASK, sched_llist_merge()) takes this same lock. The
+		 * only lock-free writer is SRQ_ENQUEUE_TASK()'s llist_add(), which
+		 * just prepends and never rewrites an existing node's ->next, so a
+		 * walk from this snapshot is stable. No need to detach the bucket
+		 * (llist_del_all) and merge it back just to look at it -- the merge
+		 * also spins retrying against those concurrent adds.
+		 */
+		first = READ_ONCE(head->first);
 		if (unlikely(NULL == first)) {
 			if (llist_empty(head)) {
 				clear_bit(idx, srq->bitmap);
@@ -4968,9 +4979,6 @@ static __always_inline int wakeup_srq_task(const int cpu)
 			struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
 			int i;
 
-			last = entry;
-			if (kick_cpu < nr_cpu_ids)
-				continue;
 			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
 				continue;
 
@@ -4985,9 +4993,10 @@ static __always_inline int wakeup_srq_task(const int cpu)
 					break;
 				}
 			}
+			if (kick_cpu < nr_cpu_ids)
+				break;
 		}
 
-		sched_llist_merge(head, first, last);
 		raw_spin_unlock(lock);
 
 		if (kick_cpu < nr_cpu_ids)
