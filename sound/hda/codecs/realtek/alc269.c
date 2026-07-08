@@ -6767,7 +6767,7 @@ static const struct hda_fixup alc269_fixups[] = {
 		.type = HDA_FIXUP_FUNC,
 		.v.func = cs35l41_fixup_i2c_two,
 		.chained = true,
-		.chain_id = ALC245_FIXUP_HP_X360_MUTE_LEDS,
+		.chain_id = ALC245_FIXUP_HP_X360_MUTE_LEDS
 	},
 	[ALC285_FIXUP_ASUS_G733Z_VERBS] = {
 		.type = HDA_FIXUP_VERBS,
@@ -6791,7 +6791,7 @@ static const struct hda_fixup alc269_fixups[] = {
 		.v.func = alc287_fixup_legion_16iax10h_aw88399,
 		.chained = true,
 		.chain_id = ALC287_FIXUP_AW88399_I2C_2,
-	},
+	}
 };
 
 static const struct hda_quirk alc269_fixup_tbl[] = {
