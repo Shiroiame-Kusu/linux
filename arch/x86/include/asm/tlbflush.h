@@ -212,6 +212,10 @@ extern u16 invlpgb_count_max;
 
 extern void initialize_tlbstate_and_flush(void);
 
+/*
+ * Keep stack-allocated flush_tlb_info cacheline aligned, but cap the
+ * alignment to avoid excessive stack usage on large-cacheline systems.
+ */
 #define FLUSH_TLB_INFO_ALIGN MIN(SMP_CACHE_BYTES, 64)
 
 /*
