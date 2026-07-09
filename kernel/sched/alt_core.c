@@ -87,7 +87,7 @@ __read_mostly int sysctl_resched_latency_warn_once = 1;
 
 /*
  * Time slice
- * (default: 4 msec, units: nanoseconds)
+ * (default: 1 << 20 ns ~= 1.05 msec, units: nanoseconds)
  */
 unsigned int sysctl_sched_base_slice __read_mostly	= (1 << 20);
 
@@ -1075,11 +1075,14 @@ static void nohz_csd_func(void *info)
 	flags = atomic_fetch_andnot(NOHZ_KICK_MASK, nohz_flags(cpu));
 	WARN_ON(!(flags & NOHZ_KICK_MASK));
 
-	rq->idle_balance = idle_cpu(cpu);
-	if (rq->idle_balance) {
-		rq->nohz_idle_balance = flags;
-		__raise_softirq_irqoff(SCHED_SOFTIRQ);
-	}
+	/*
+	 * The mainline-derived body raised SCHED_SOFTIRQ here, but no
+	 * SCHED_SOFTIRQ handler is registered in the alt scheduler build
+	 * (fair.c's open_softirq() is not compiled) -- if this CSD ever
+	 * became reachable that raise would invoke a NULL softirq action.
+	 * Nothing sends this CSD today (no kick_ilb()); keep only the
+	 * flag release that parks it safely.
+	 */
 }
 
 #endif /* CONFIG_NO_HZ_COMMON */
@@ -6916,7 +6919,6 @@ void __init sched_init(void)
 		rq->online = false;
 		rq->cpu = i;
 
-		rq->balance_func = NULL;
 		rq->active_balance_arg.active = 0;
 
 #ifdef CONFIG_NO_HZ_COMMON
