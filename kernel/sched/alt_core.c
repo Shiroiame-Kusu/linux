@@ -5095,29 +5095,37 @@ repick:
 	/* pick next task from schedule run queue */
 	if (!bitmap_empty(srq->bitmap, pick_sched_prio)) {
 		int idx;
-		DECLARE_BITMAP(lock_bitmap, SCHED_QUEUE_BITS) = { 0 };
 
-		/* trylock loop, reduce waiting time of pq lock  */
+		/*
+		 * Buckets must be examined strictly in priority order: the old
+		 * scheme trylocked every bucket and deferred contended ones to
+		 * a second locking pass, so a busy high-priority bucket could
+		 * be bypassed in favor of lower-priority work -- a transient
+		 * priority inversion on every pick that raced a bucket lock
+		 * (RT behind nice-0). Trylock while uncontended; on the first
+		 * contended bucket fall through to plain locking from that
+		 * point on. Bucket hold times are short (in-place unlink), so
+		 * waiting beats picking the wrong task.
+		 */
 		for_each_set_bit(idx, srq->bitmap, pick_sched_prio) {
 			raw_spinlock_t	*lock = &srq->_lock[idx];
 			struct llist_head *head = &srq->_head[idx];
 
-			if (raw_spin_trylock(lock)) {
-				PQ_PICK_TASK;
-				raw_spin_unlock(lock);
-			} else {
-				set_bit(idx, lock_bitmap);
-			}
-		}
-
-		/* lock loop */
-		for_each_set_bit(idx, lock_bitmap, pick_sched_prio) {
-			raw_spinlock_t	*lock = &srq->_lock[idx];
-			struct llist_head *head = &srq->_head[idx];
-
-			raw_spin_lock(lock);
+			if (!raw_spin_trylock(lock))
+				break;
 			PQ_PICK_TASK;
 			raw_spin_unlock(lock);
+		}
+
+		if (idx < pick_sched_prio) {
+			for_each_set_bit_from(idx, srq->bitmap, pick_sched_prio) {
+				raw_spinlock_t	*lock = &srq->_lock[idx];
+				struct llist_head *head = &srq->_head[idx];
+
+				raw_spin_lock(lock);
+				PQ_PICK_TASK;
+				raw_spin_unlock(lock);
+			}
 		}
 	}
 
