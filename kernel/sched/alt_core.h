@@ -93,61 +93,54 @@ extern void wakeup_modified_task(struct task_struct *p);
 /*
  * run queue related inlined functions
  */
+/*
+ * Unlink @target from the bucket list @head in place. The caller must hold
+ * the bucket's _lock[idx]: all removers (pick_next_task()'s PQ_PICK_TASK,
+ * SRQ_DEQUEUE_TASK()) serialize on it, so interior ->next pointers are
+ * stable under the lock. The only lock-free writer is SRQ_ENQUEUE_TASK()'s
+ * llist_add(), which just prepends -- it can only race the head cmpxchg,
+ * never an interior unlink, and a failed cmpxchg means @target gained a
+ * predecessor that the walk below then finds.
+ *
+ * Unlike the historical llist_del_all() + walk + re-merge scheme, this
+ * touches no node but @target's predecessor: no O(n) reversals, no merge
+ * loop retrying against concurrent adds while the lock is held.
+ *
+ * A false return is a legitimate, self-healing race, not a bug.
+ * SRQ_ENQUEUE_TASK() publishes p->__sched_prio (and on_rq=QUEUED) before
+ * its lock-free llist_add(), so a concurrent __task_modify_lock() dequeuer
+ * holding _lock[idx] can observe the membership token while pq_node is not
+ * yet linked. SRQ_DEQUEUE_TASK() then returns false and every caller
+ * (__task_modify_lock / task_access_lock) retries until the enqueue is
+ * visible. The reverse store order would instead leave pq_node linked with
+ * __sched_prio==-1, routing dequeuers to the rq path -- worse.
+ */
 static __always_inline
-bool sched_llist_del(struct llist_node **first, struct llist_node *target,
-		     struct llist_node **last)
+bool sched_llist_unlink(struct llist_head *head, struct llist_node *target)
 {
-	struct llist_node **curr = first;
-	struct llist_node *entry;
-	bool found = false;
+	struct llist_node *first = READ_ONCE(head->first);
+	struct llist_node *node;
 
-	while (*curr) {
-		entry = *curr;
+	if (!first)
+		return false;
 
-		if (entry == target) {
-			*curr = entry->next;
+	if (first == target) {
+		if (try_cmpxchg(&head->first, &first, target->next)) {
 			target->next = NULL;
-			found = true;
-		} else {
-			*last = entry;
-			curr = &entry->next;
+			return true;
+		}
+		/* llist_add() prepended new nodes; @target is interior now. */
+	}
+
+	for (node = first; node->next; node = node->next) {
+		if (node->next == target) {
+			node->next = target->next;
+			target->next = NULL;
+			return true;
 		}
 	}
 
-	/*
-	 * !found is a legitimate, self-healing race, not a bug. SRQ_ENQUEUE_TASK()
-	 * publishes p->__sched_prio (and on_rq=QUEUED) before its lock-free
-	 * llist_add(), so a concurrent __task_modify_lock() dequeuer holding
-	 * _lock[idx] can observe the membership token while pq_node is not yet
-	 * linked. SRQ_DEQUEUE_TASK() then re-merges and returns false, and every
-	 * caller (__task_modify_lock / task_access_lock) retries until the enqueue
-	 * is visible. The reverse store order would instead leave pq_node linked
-	 * with __sched_prio==-1, routing dequeuers to the rq path -- worse.
-	 */
-	return found;
-}
-
-static __always_inline
-void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct llist_node *last)
-{
-	while (!llist_add_batch(first, last, head)) {
-		struct llist_node *node, *new_first = llist_del_all(head);
-
-		/* move [first, last] to the tail */
-		for (node = last->next; node->next; node = node->next);
-		node->next = first;
-
-		/* merge new first if any */
-		if (new_first != first) {
-			for (node = new_first; first != node->next; node = node->next);
-			node->next = last->next;
-			first = new_first;
-		} else {
-			first = last->next;
-		}
-		/* terminal the tail */
-		last->next = NULL;
-	}
+	return false;
 }
 
 /*
@@ -157,29 +150,21 @@ void sched_llist_merge(struct llist_head *head, struct llist_node *first, struct
  */
 #define SRQ_DEQUEUE_TASK(srq, p, __modify_body__)					\
 ({											\
-	bool __found = true;								\
 	int idx = READ_ONCE(p->__sched_prio);						\
 	struct llist_head *head = &srq->_head[idx];					\
-	struct llist_node *last = NULL, *first = llist_del_all(head);			\
+	bool __found = sched_llist_unlink(head, &p->pq_node);				\
 											\
-	__found = sched_llist_del(&first, &p->pq_node, &last);				\
-	if (unlikely(!__found)) {							\
-		if (first)								\
-			sched_llist_merge(head, first, last);				\
-		__found = false;							\
-	} else if (first) {								\
-		sched_llist_merge(head, first, last);					\
-	} else if (llist_empty(head)) {							\
-		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
-		clear_bit(idx, srq->bitmap);						\
-		smp_mb__after_atomic();							\
-		if (!llist_empty(head))							\
-			set_bit(idx, srq->bitmap);					\
-	}										\
 	if (__found) {									\
 		__modify_body__								\
 		WRITE_ONCE(p->__sched_prio, -1);					\
 		atomic_dec(&srq->nr_queued);						\
+		if (llist_empty(head)) {						\
+			WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
+			clear_bit(idx, srq->bitmap);					\
+			smp_mb__after_atomic();						\
+			if (!llist_empty(head))						\
+				set_bit(idx, srq->bitmap);				\
+		}									\
 	}										\
 	__found;									\
 })
