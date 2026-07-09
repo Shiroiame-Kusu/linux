@@ -2608,6 +2608,19 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 			raw_spin_lock(&rq->lock);
 		}
 
+		/*
+		 * An IO-wait wakeup with a CPU already picked is where the
+		 * schedutil iowait boost must be signalled; without it the
+		 * governor only ever sees tick-driven updates and IO-bound
+		 * tasks ramp a freshly-idle CPU one tick at a time. The grq
+		 * path below has no target CPU to boost (and the task is
+		 * running by the time one picks it up).
+		 */
+		if (p->in_iowait) {
+			update_rq_clock(rq);
+			cpufreq_update_util(rq, SCHED_CPUFREQ_IOWAIT);
+		}
+
 		wakeup_preempt_on_rq(p, rq);
 	} else {
 		activate_task(p, srq);
