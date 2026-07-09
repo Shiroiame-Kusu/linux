@@ -1992,7 +1992,21 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
 	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 
-	resched_curr(rq);
+	/*
+	 * Only preempt when @p outranks the running task, mirroring
+	 * ttwu_runnable() and the __wakeup_rq_trylock() candidate rule.
+	 * Pinned tasks land here unconditionally, so without this check
+	 * every per-CPU kthread wakeup forced a full (and fruitless)
+	 * __schedule() on the target -- pick_preempt_task() would just
+	 * requeue @p and resume the higher/equal-priority current.
+	 * Pickup stays guaranteed: pick_preempt_task() drains the list on
+	 * the next natural __schedule() (slice expiry at the tick for a
+	 * normal current; an RT current legitimately shields lower
+	 * priorities until it blocks).
+	 */
+	if (rq->curr == rq->idle ||
+	    task_sched_prio(p) < READ_ONCE(cpu_prio[cpu]))
+		resched_curr(rq);
 }
 
 static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
