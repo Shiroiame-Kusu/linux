@@ -1329,19 +1329,25 @@ static inline void hrtick_start(struct rq *rq, u64 delay)
 	 */
 	delta = max_t(s64, delay, 10000LL);
 
-	rq->hrtick_time = ktime_add_ns(ktime_get(), delta);
-	if (!hrtick_needs_rearm(&rq->hrtick_timer, rq->hrtick_time))
-		return;
-
 	/*
-	 * If this is in the middle of schedule() only note the delay
-	 * and let hrtick_schedule_exit() deal with it.
+	 * If this is in the middle of schedule() only note the delay and
+	 * let hrtick_schedule_exit() deal with it. The request must be
+	 * recorded unconditionally (not just when hrtick_needs_rearm()):
+	 * hrtick_schedule_exit() cancels any queued timer no START was
+	 * recorded for, so an early return here would get a still-wanted
+	 * expiry cancelled. The exit path re-evaluates hrtick_needs_rearm()
+	 * anyway, and doing the ktime_get() once there is cheaper than
+	 * once in each.
 	 */
 	if (rq->hrtick_sched) {
 		rq->hrtick_sched |= HRTICK_SCHED_START;
 		rq->hrtick_delay = delta;
 		return;
 	}
+
+	rq->hrtick_time = ktime_add_ns(ktime_get(), delta);
+	if (!hrtick_needs_rearm(&rq->hrtick_timer, rq->hrtick_time))
+		return;
 
 	if (rq == this_rq())
 		hrtimer_start(&rq->hrtick_timer, rq->hrtick_time, HRTIMER_MODE_ABS_PINNED_HARD);
@@ -1361,14 +1367,17 @@ static inline void hrtick_schedule_exit(struct rq *rq)
 	if (rq->hrtick_sched & HRTICK_SCHED_START) {
 		rq->hrtick_time = ktime_add_ns(ktime_get(), rq->hrtick_delay);
 		hrtick_cond_restart(rq);
-	} else if (idle_rq(rq)) {
+	} else if (hrtimer_is_queued(&rq->hrtick_timer)) {
 		/*
-		 * No need for using hrtimer_is_active(). The timer is CPU local
-		 * and interrupts are disabled, so the callback cannot be
-		 * running and the queued state is valid.
+		 * A queued expiry that no START was recorded for this pass
+		 * belongs to a previous pick (sub-tick slice of a task that
+		 * blocked or was switched out) or to a CPU going idle; left
+		 * queued it would fire a spurious resched. No need for
+		 * hrtimer_is_active(): the timer is CPU local and interrupts
+		 * are disabled, so the callback cannot be running, the queued
+		 * state is valid and the cancel is a cheap dequeue.
 		 */
-		if (hrtimer_is_queued(&rq->hrtick_timer))
-			hrtimer_cancel(&rq->hrtick_timer);
+		hrtimer_cancel(&rq->hrtick_timer);
 	}
 
 	if (rq->hrtick_sched & HRTICK_SCHED_REARM_HRTIMER)
@@ -3474,7 +3483,8 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
 	rq->curr->time_slice /= 2;
 	p->time_slice = rq->curr->time_slice;
 #ifdef CONFIG_SCHED_HRTICK
-	hrtick_start(rq, rq->curr->time_slice);
+	if (rq->curr->time_slice < (s64)TICK_NSEC && hrtick_enabled(rq))
+		hrtick_start(rq, rq->curr->time_slice);
 #endif
 
 	if (p->time_slice < RESCHED_NS) {
@@ -5164,7 +5174,18 @@ repick:
 	}
 picked:
 #ifdef CONFIG_SCHED_HRTICK
-	hrtick_start(rq, next->time_slice);
+	/*
+	 * Only slices shorter than a tick period need a high-resolution
+	 * expiry; anything longer is expired by the regular tick with at
+	 * most one period of error (the same quantization mainline runs
+	 * with, HRTICK being default-off there). Arming here for every
+	 * pick cost a ktime_get() plus, on each slice renewal, a hrtimer
+	 * reprogram and an extra timer interrupt duplicating the tick's
+	 * job. Stale sub-tick expiries left queued by this gate are
+	 * cancelled in hrtick_schedule_exit().
+	 */
+	if (next->time_slice < (s64)TICK_NSEC && hrtick_enabled(rq))
+		hrtick_start(rq, next->time_slice);
 #endif
 	/*printk(KERN_INFO "sched: choose_next_task(%d) next %px\n", cpu, next);*/
 	return next;
