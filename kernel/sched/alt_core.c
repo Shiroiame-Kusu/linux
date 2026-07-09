@@ -123,7 +123,15 @@ DEFINE_PER_CPU_SHARED_ALIGNED(struct llist_head, preempt_list) = { NULL };
 # define finish_arch_post_lock_switch()	do { } while (0)
 #endif
 
-static int cpu_prio[NR_CPUS] ____cacheline_aligned_in_smp;
+/*
+ * Sched prio of each CPU's current task. Written by the owning CPU on
+ * nearly every context switch and read remotely by every wakeup placement
+ * scan; as a plain array 16 CPUs shared one cache line, so each switch
+ * invalidated the line for 15 other CPUs' scans. Per-CPU placement in the
+ * shared-aligned section gives every writer its own line.
+ */
+static DEFINE_PER_CPU_SHARED_ALIGNED(int, sched_cpu_prio);
+#define cpu_prio(cpu)	per_cpu(sched_cpu_prio, (cpu))
 
 cpumask_t cpu_sched_prio_mask[SCHED_LEVELS]			____cacheline_aligned_in_smp;
 DECLARE_BITMAP(cpu_sched_prio_bitmap, SCHED_LEVELS)		____cacheline_aligned_in_smp;
@@ -134,12 +142,12 @@ DECLARE_BITMAP(cpu_sched_prio_bitmap, SCHED_LEVELS)		____cacheline_aligned_in_sm
 
 static __always_inline void update_sched_cpu_prio(const int cpu, const int prio)
 {
-	int last_prio = READ_ONCE(cpu_prio[cpu]);
+	int last_prio = READ_ONCE(cpu_prio(cpu));
 
 	if (prio == last_prio)
 		return;
 
-	WRITE_ONCE(cpu_prio[cpu], prio);
+	WRITE_ONCE(cpu_prio(cpu), prio);
 
 	if (IDLE_TASK_SCHED_PRIO == last_prio) {
 		sched_clear_idle_mask(cpu);
@@ -671,7 +679,7 @@ static inline void sched_update_tick_dependency(struct rq *rq)
 	if (!tick_nohz_full_cpu(cpu))
 		return;
 
-	if ((IDLE_TASK_SCHED_PRIO != READ_ONCE(cpu_prio[cpu])) &&
+	if ((IDLE_TASK_SCHED_PRIO != READ_ONCE(cpu_prio(cpu))) &&
 	    (0 == srq_nr_queued(cpu)) && is_preempt_list_empty(cpu))
 		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
 	else
@@ -1982,7 +1990,7 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
 	 * priorities until it blocks).
 	 */
 	if (rq->curr == rq->idle ||
-	    task_sched_prio(p) < READ_ONCE(cpu_prio[cpu]))
+	    task_sched_prio(p) < READ_ONCE(cpu_prio(cpu)))
 		resched_curr(rq);
 }
 
@@ -2638,7 +2646,7 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
 				update_rq_clock(rq);
-				if (task_sched_prio(p) < READ_ONCE(cpu_prio[cpu_of(rq)]))
+				if (task_sched_prio(p) < READ_ONCE(cpu_prio(cpu_of(rq))))
 					resched_curr(rq);
 				ttwu_do_wakeup(p);
 				ret = 1;
@@ -2678,7 +2686,7 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 				 * When on_rq && !on_cpu the task is preempted, see if
 				 * it should preempt the task that is current now.
 				 */
-				if (task_sched_prio(p) < READ_ONCE(cpu_prio[cpu_of(rq)])) {
+				if (task_sched_prio(p) < READ_ONCE(cpu_prio(cpu_of(rq)))) {
 					resched_curr(rq);
 				}
 			}
@@ -4718,7 +4726,7 @@ static inline void alt_sched_rq_debug(struct rq *rq)
 	const int cpu = cpu_of(rq);
 
 	printk(KERN_INFO "sched: rq(%02d) nr_pinned=%d, prio=%d\n",
-	       cpu, rq->nr_pinned, READ_ONCE(cpu_prio[cpu]));
+	       cpu, rq->nr_pinned, READ_ONCE(cpu_prio(cpu)));
 }
 
 static inline void alt_sched_task_debug(struct task_struct *p)
@@ -4996,7 +5004,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
 				if (i == cpu || !is_cpu_allowed(p, i))
 					continue;
-				if (idx < READ_ONCE(cpu_prio[i])) {
+				if (idx < READ_ONCE(cpu_prio(i))) {
 					kick_cpu = i;
 					break;
 				}
@@ -5081,7 +5089,7 @@ static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, i
 	struct task_struct *next;
 	bool blocked = rq->block;
 	bool repicked = false;
-	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO : READ_ONCE(cpu_prio[cpu]) + expired;
+	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO : READ_ONCE(cpu_prio(cpu)) + expired;
 
 repick:
 	if ((next = pick_preempt_task(cpu, pick_sched_prio)))
@@ -6860,7 +6868,7 @@ void __init sched_init(void)
 #endif /* CONFIG_CGROUP_SCHED */
 	sched_run_queue_init(&grq);
 	for_each_possible_cpu(i) {
-		WRITE_ONCE(cpu_prio[i], IDLE_TASK_SCHED_PRIO);
+		WRITE_ONCE(cpu_prio(i), IDLE_TASK_SCHED_PRIO);
 
 		rq = cpu_rq(i);
 
@@ -8168,7 +8176,7 @@ void sched_change_end(struct sched_change_ctx *ctx)
 
 		update_sched_cpu_prio(cpu, task_sched_prio(ctx->p));
 		if (find_first_bit(rq_srq(rq)->bitmap, SCHED_QUEUE_BITS) <
-		    READ_ONCE(cpu_prio[cpu]))
+		    READ_ONCE(cpu_prio(cpu)))
 			resched_curr(rq);
 	}
 }
