@@ -478,9 +478,18 @@ extern void resched_cpu(int cpu);
 struct sched_run_queue {
 	raw_spinlock_t		_lock[SCHED_QUEUE_BITS];
 	struct llist_head	_head[SCHED_QUEUE_BITS];
-	DECLARE_BITMAP(bitmap, SCHED_QUEUE_BITS);
-	atomic_t		nr_queued;
-	atomic_t		nr_uninterruptible;
+	/*
+	 * Deliberate cache-line separation: the bitmap is read by every
+	 * pick on every CPU and RMW'd on bucket-emptiness transitions --
+	 * unpadded it shared a line with the last _head[] buckets.
+	 * nr_queued takes two atomic RMWs per enqueue/dequeue cycle from
+	 * all CPUs and must not force those writes onto the bitmap
+	 * readers' line, nor onto the (rarer, sleep-path) loadavg/iowait
+	 * counters below.
+	 */
+	DECLARE_BITMAP(bitmap, SCHED_QUEUE_BITS) ____cacheline_aligned;
+	atomic_t		nr_queued ____cacheline_aligned;
+	atomic_t		nr_uninterruptible ____cacheline_aligned;
 	atomic_t		nr_iowait;
 };
 
