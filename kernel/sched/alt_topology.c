@@ -72,16 +72,29 @@ static __always_inline void sched_set_idle_mask(const unsigned int cpu)
 #ifdef CONFIG_SCHED_SMT
 	case CPU_TOPOLOGY_UCORE_SMT:
 	case CPU_TOPOLOGY_PCORE_SMT:
-	case CPU_TOPOLOGY_ECORE_SMT:
+	case CPU_TOPOLOGY_ECORE_SMT: {
+		/*
+		 * cpu_sched_prio_mask[] is updated concurrently by other CPUs'
+		 * idle transitions under only their own rq->lock. Whole-mask
+		 * cpumask_or()/cpumask_andnot() are plain read-modify-writes
+		 * and lose remote cores' bits; only per-bit atomics are safe
+		 * here. The group-idle classification itself may still go
+		 * momentarily stale (it is advisory and self-heals on the
+		 * next transition), but bits of unrelated cores must not.
+		 */
+		const struct cpumask *smt_mask = cpu_smt_mask(cpu);
+		int i;
+
 		topo -= CPU_TOPOLOGY_UCORE_SMT;
-		if (cpumask_intersects(cpu_smt_mask(cpu), sched_idle_mask)) {
-			cpumask_or(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-				   cpu_smt_mask(cpu));
+		if (cpumask_intersects(smt_mask, sched_idle_mask)) {
+			for_each_cpu(i, smt_mask)
+				cpumask_set_cpu(i, cpu_sched_prio_mask + topo);
 			set_bit(topo, cpu_sched_prio_bitmap);
 
 			topo += 3;
-			if (!cpumask_andnot(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-					    cpu_smt_mask(cpu)))
+			for_each_cpu(i, smt_mask)
+				cpumask_clear_cpu(i, cpu_sched_prio_mask + topo);
+			if (cpumask_empty(cpu_sched_prio_mask + topo))
 				clear_bit(topo, cpu_sched_prio_bitmap);
 		} else {
 			topo += 3;
@@ -89,6 +102,7 @@ static __always_inline void sched_set_idle_mask(const unsigned int cpu)
 			set_bit(topo, cpu_sched_prio_bitmap);
 		}
 		break;
+	}
 #endif
 	}
 
@@ -114,17 +128,25 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 #ifdef CONFIG_SCHED_SMT
 	case CPU_TOPOLOGY_UCORE_SMT:
 	case CPU_TOPOLOGY_PCORE_SMT:
-	case CPU_TOPOLOGY_ECORE_SMT:
+	case CPU_TOPOLOGY_ECORE_SMT: {
+		/* Per-bit atomics: see the comment in sched_set_idle_mask(). */
+		const struct cpumask *smt_mask = cpu_smt_mask(cpu);
+		int i;
+
 		topo -= CPU_TOPOLOGY_UCORE_SMT;
 		if (cpumask_test_cpu(cpu, cpu_sched_prio_mask + topo)) {
-			if (!cpumask_andnot(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-					    cpu_smt_mask(cpu)))
+			for_each_cpu(i, smt_mask)
+				cpumask_clear_cpu(i, cpu_sched_prio_mask + topo);
+			if (cpumask_empty(cpu_sched_prio_mask + topo))
 				clear_bit(topo, cpu_sched_prio_bitmap);
 
 			topo += 3;
-			cpumask_or(cpu_sched_prio_mask + topo, cpu_sched_prio_mask + topo,
-				   cpu_smt_mask(cpu));
-			cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
+			for_each_cpu(i, smt_mask) {
+				if (i == cpu)
+					cpumask_clear_cpu(i, cpu_sched_prio_mask + topo);
+				else
+					cpumask_set_cpu(i, cpu_sched_prio_mask + topo);
+			}
 			set_bit(topo, cpu_sched_prio_bitmap);
 		} else {
 			topo += 3;
@@ -132,6 +154,7 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 			if (cpumask_empty(cpu_sched_prio_mask + topo))
 				clear_bit(topo, cpu_sched_prio_bitmap);
 		}
+	}
 #endif
 	}
 
