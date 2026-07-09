@@ -4970,12 +4970,11 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		 * Read-only scan of the live bucket. We hold _lock[idx], so no
 		 * dequeue or relink can run concurrently -- every remover
 		 * (pick_next_task()'s PQ_PICK_TASK, __task_modify_lock()'s
-		 * SRQ_DEQUEUE_TASK, sched_llist_merge()) takes this same lock. The
-		 * only lock-free writer is SRQ_ENQUEUE_TASK()'s llist_add(), which
-		 * just prepends and never rewrites an existing node's ->next, so a
-		 * walk from this snapshot is stable. No need to detach the bucket
-		 * (llist_del_all) and merge it back just to look at it -- the merge
-		 * also spins retrying against those concurrent adds.
+		 * SRQ_DEQUEUE_TASK, both via sched_llist_unlink()) takes this
+		 * same lock. The only lock-free writer is SRQ_ENQUEUE_TASK()'s
+		 * llist_add(), which just prepends and never rewrites an
+		 * existing node's ->next, so a walk from this snapshot is
+		 * stable.
 		 */
 		first = READ_ONCE(head->first);
 		if (unlikely(NULL == first)) {
@@ -5024,41 +5023,59 @@ static __always_inline int wakeup_srq_task(const int cpu)
 	return strand_idx;
 }
 
+/*
+ * Pick the oldest eligible task from a grq bucket. The bucket llist is
+ * LIFO (llist_add() prepends), so the last eligible node of a walk is the
+ * oldest -- FIFO fairness without detaching the list. We hold _lock[idx],
+ * which serializes all removers; the only concurrent writer is the
+ * lock-free llist_add(), which just prepends: interior ->next pointers are
+ * stable, and only an unlink at the head must cmpxchg (see
+ * sched_llist_unlink()). This replaces the historical llist_del_all() +
+ * two llist_reverse_order() passes + re-merge, which rewrote every node's
+ * ->next three times per pick and could spin re-merging against concurrent
+ * enqueues while the bucket lock was held.
+ */
 #define PQ_PICK_TASK										\
 {												\
-	struct llist_node *first = llist_del_all(head);						\
-	if (first) {										\
-		first = llist_reverse_order(first);						\
-		struct llist_node **curr = &first;						\
-		while (*curr) {									\
-			struct llist_node *entry = *curr;					\
-			struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);\
-			if (is_cpu_allowed(p, cpu)) {						\
-				*curr = entry->next;						\
-				next = p;							\
-				break;								\
-			}									\
-			curr = &entry->next;							\
+	struct llist_node *first = READ_ONCE(head->first);					\
+	struct llist_node *node, *prev_node = NULL, *cand = NULL, *cand_prev = NULL;		\
+												\
+	for (node = first; node; prev_node = node, node = node->next) {				\
+		struct task_struct *p = llist_entry(node, struct task_struct, pq_node);	\
+		if (is_cpu_allowed(p, cpu)) {							\
+			cand = node;								\
+			cand_prev = prev_node;							\
 		}										\
-		if (first) {									\
-			/* ~3.3% to process all remain tasks to other cpu, no point to do so*/	\
-			struct llist_node *last = first;					\
-			first = llist_reverse_order(first);					\
-			sched_llist_merge(head, first, last);					\
-		} else if (llist_empty(head)) {							\
+	}											\
+	if (cand) {										\
+		if (cand_prev) {								\
+			cand_prev->next = cand->next;						\
+		} else if (!try_cmpxchg(&head->first, &first, cand->next)) {			\
+			/* llist_add() prepended; find cand's new predecessor. */		\
+			for (node = first; node->next != cand; node = node->next)		\
+				;								\
+			node->next = cand->next;						\
+		}										\
+		cand->next = NULL;								\
+		next = llist_entry(cand, struct task_struct, pq_node);				\
+		if (llist_empty(head)) {							\
 			clear_bit(idx, srq->bitmap);						\
 			smp_mb__after_atomic();							\
 			if (!llist_empty(head))							\
 				set_bit(idx, srq->bitmap);					\
 		}										\
-		if (next) {									\
-			if (task_cpu(next) != cpu)						\
-				set_task_cpu(next, cpu);					\
-			WRITE_ONCE(next->__sched_prio, -1);					\
-			atomic_dec(&srq->nr_queued);						\
-			raw_spin_unlock(lock);							\
-			goto picked;								\
-		}										\
+		if (task_cpu(next) != cpu)							\
+			set_task_cpu(next, cpu);						\
+		WRITE_ONCE(next->__sched_prio, -1);						\
+		atomic_dec(&srq->nr_queued);							\
+		raw_spin_unlock(lock);								\
+		goto picked;									\
+	} else if (!first && llist_empty(head)) {						\
+		/* Stale bitmap bit: bucket emptied by a dequeue-side path. */			\
+		clear_bit(idx, srq->bitmap);							\
+		smp_mb__after_atomic();								\
+		if (!llist_empty(head))								\
+			set_bit(idx, srq->bitmap);						\
 	}											\
 }
 
