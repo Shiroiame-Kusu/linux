@@ -181,8 +181,6 @@ struct balance_callback {
 	void (*func)(struct rq *rq);
 };
 
-typedef void (*balance_func_t)(struct rq *rq, int cpu);
-
 struct balance_arg {
 	int			active;
 };
@@ -215,14 +213,11 @@ struct rq {
 	bool online;
 
 	unsigned int		ttwu_pending;
-	unsigned char		nohz_idle_balance;
-	unsigned char		idle_balance;
 
 #ifdef CONFIG_HAVE_SCHED_AVG_IRQ
 	struct sched_avg	avg_irq;
 #endif
 
-	balance_func_t		balance_func;
 	struct balance_arg	active_balance_arg		____cacheline_aligned;
 	struct cpu_stop_work	active_balance_work;
 
