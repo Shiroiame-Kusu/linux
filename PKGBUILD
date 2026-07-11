@@ -90,6 +90,7 @@ prepare() {
     echo "${pkgbase#linux}" > localversion.20-pkgname
 
     echo "Preparing build..."
+    cp config .config
     make "${BUILD_FLAGS[@]}" prepare
 
     make -s kernelrelease > version
