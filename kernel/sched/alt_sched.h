@@ -474,6 +474,17 @@ struct sched_run_queue {
 	raw_spinlock_t		_lock[SCHED_QUEUE_BITS];
 	struct llist_head	_head[SCHED_QUEUE_BITS];
 	/*
+	 * Consumer side of each bucket. _head[] is a lock-free LIFO stack,
+	 * so deriving FIFO order from it meant walking to its tail on every
+	 * pick -- O(queue length) inside _lock[], and the queue length is
+	 * exactly what oversubscription grows. The pick instead pops _fifo[]
+	 * and, when that runs dry, drains _head[] into it in one pass: each
+	 * task is reordered once on its way through rather than the whole
+	 * bucket being walked once per pick. Only ever touched under
+	 * _lock[idx], so no atomics and no emptiness re-check are needed.
+	 */
+	struct list_head	_fifo[SCHED_QUEUE_BITS];
+	/*
 	 * Deliberate cache-line separation: the bitmap is read by every
 	 * pick on every CPU and RMW'd on bucket-emptiness transitions --
 	 * unpadded it shared a line with the last _head[] buckets.
