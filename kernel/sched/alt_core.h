@@ -96,7 +96,7 @@ extern void wakeup_modified_task(struct task_struct *p);
 /*
  * Unlink @target from the producer stack @head in place. The caller must hold
  * the bucket's _lock[idx]: all removers (SRQ_DEQUEUE_TASK(), and the
- * srq_bucket_refill*() drains) serialize on it, so interior ->next pointers
+ * srq_bucket_refill() drain) serialize on it, so interior ->next pointers
  * are stable under the lock. The only lock-free writer is SRQ_ENQUEUE_TASK()'s
  * llist_add(), which just prepends -- it can only race the head cmpxchg,
  * never an interior unlink, and a failed cmpxchg means @target gained a
@@ -175,65 +175,44 @@ bool srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
 }
 
 /*
- * Move the bucket's lock-free arrivals onto its consumer FIFO. Caller holds
- * _lock[idx] and must have found _fifo[idx] empty.
+ * Splice the bucket's lock-free arrivals onto the tail of its consumer FIFO,
+ * oldest first. Caller holds _lock[idx]; the FIFO may be empty or populated
+ * (the latter when it holds only tasks restricted away from the picking CPU).
  *
- * llist_del_all() hands the batch back newest-first, so head-inserting each
- * entry in that order leaves the oldest at the head: FIFO in a single pass,
- * with no reversal pass and no tail pointer. This is what makes the pick
- * amortised O(1) -- each task is reordered exactly once on its way through
- * the bucket, instead of the whole bucket being walked to its tail on every
- * pick.
+ * llist_del_all() hands the batch back newest-first, and every entry goes in
+ * directly after @anchor -- the FIFO's tail as it stood before the drain --
+ * so the batch is reversed as it is spliced. One pass does what a
+ * llist_reverse_order() plus an append pass did, touching each task's
+ * cachelines once. FIFO order holds across both batches because every entry
+ * already on _fifo[] was enqueued before anything still on _head[].
+ *
+ * This is what makes the pick amortised O(1): a task is reordered exactly
+ * once on its way through the bucket, rather than the whole bucket being
+ * walked to its tail on every pick.
+ *
+ * Returns the oldest appended task, so a caller that has already walked the
+ * pre-existing entries can resume there, or NULL if nothing had arrived.
  */
 static __always_inline
-void srq_bucket_refill(struct sched_run_queue *srq, const int idx)
+struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx)
 {
-	struct llist_node *node;
-
-	/*
-	 * Head-insertion only yields FIFO from an empty list. Callers that may
-	 * face a populated FIFO must use srq_bucket_refill_tail(); enforce it
-	 * rather than silently ordering new tasks ahead of older ones, which
-	 * would starve them with no crash and nothing in the pick to detect it.
-	 */
-	WARN_ON_ONCE(!list_empty(&srq->_fifo[idx]));
-
-	node = llist_del_all(&srq->_head[idx]);
+	struct list_head *fifo = &srq->_fifo[idx];
+	struct list_head *anchor = fifo->prev;
+	struct llist_node *node = llist_del_all(&srq->_head[idx]);
 
 	while (node) {
 		struct task_struct *p = llist_entry(node, struct task_struct, pq_node);
 
 		node = node->next;
-		/* Keep the __sched_fork() invariant: detached pq_node has no next. */
+		/* Keep the __sched_fork() invariant: a detached pq_node has no next. */
 		p->pq_node.next = NULL;
-		list_add(&p->pq_fifo, &srq->_fifo[idx]);
-	}
-}
-
-/*
- * Fallback refill, for the rare case where _fifo[idx] holds only tasks that
- * cannot run on the picking CPU (explicitly cpuset/taskset-restricted tasks;
- * pinned ones never reach the GRQ at all). Append the new arrivals behind the
- * ineligible ones so FIFO order across both batches is preserved, and return
- * the first appended entry so the caller can resume its walk there.
- */
-static __always_inline
-struct list_head *srq_bucket_refill_tail(struct sched_run_queue *srq, const int idx)
-{
-	struct llist_node *node = llist_reverse_order(llist_del_all(&srq->_head[idx]));
-	struct list_head *resume = NULL;
-
-	while (node) {
-		struct task_struct *p = llist_entry(node, struct task_struct, pq_node);
-
-		node = node->next;
-		p->pq_node.next = NULL;
-		list_add_tail(&p->pq_fifo, &srq->_fifo[idx]);
-		if (!resume)
-			resume = &p->pq_fifo;
+		list_add(&p->pq_fifo, anchor);
 	}
 
-	return resume;
+	if (anchor->next == fifo)
+		return NULL;
+
+	return list_entry(anchor->next, struct task_struct, pq_fifo);
 }
 
 /*
