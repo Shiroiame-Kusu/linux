@@ -5036,6 +5036,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		raw_spinlock_t *lock = &srq->_lock[idx];
 		struct task_struct *p;
 		int preempt_idx;
+		bool can_kick;
 
 		raw_spin_lock(lock);
 
@@ -5073,6 +5074,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		 * ever changes under _lock[idx], which we hold.
 		 */
 		preempt_idx = SCHED_LEVELS - 1 - idx;
+		can_kick = !bitmap_empty(cpu_sched_prio_bitmap, preempt_idx);
 
 		list_for_each_entry(p, &srq->_fifo[idx], pq_fifo) {
 			int j;
@@ -5093,13 +5095,32 @@ static __always_inline int wakeup_srq_task(const int cpu)
 					break;
 			}
 
-			if (kick_cpu < nr_cpu_ids)
+			/*
+			 * Stop once both answers are settled. @can_kick is a
+			 * property of the bucket, not of @p: with no level set
+			 * below @idx there is no preemptable CPU for anything
+			 * in here, so strand_idx is all the walk can still
+			 * learn. That is the loaded case -- exactly when the
+			 * bucket is long -- and without this the walk would
+			 * drag it through the lock in full for nothing.
+			 */
+			if (kick_cpu < nr_cpu_ids || (strand_idx >= 0 && !can_kick))
 				break;
 		}
 
 		raw_spin_unlock(lock);
 
-		if (kick_cpu < nr_cpu_ids)
+		/*
+		 * The same test retires the whole scan, for the same reason:
+		 * @can_kick only shrinks as @idx rises, since a larger @idx
+		 * tests a strictly shorter prefix of the level bitmap. No later
+		 * bucket can offer a kick target once this one cannot, and
+		 * strand_idx is already answered -- the caller only tests its
+		 * sign, so a later bucket could not improve it. Under load that
+		 * is one contended bucket lock on the path to idle instead of
+		 * one per set bit.
+		 */
+		if (kick_cpu < nr_cpu_ids || (strand_idx >= 0 && !can_kick))
 			break;
 	}
 
