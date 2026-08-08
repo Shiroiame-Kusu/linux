@@ -161,15 +161,17 @@ bool srq_bucket_empty(struct sched_run_queue *srq, const int idx)
  * under _lock[idx].
  */
 static __always_inline
-void srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
+bool srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
 {
 	if (!srq_bucket_empty(srq, idx))
-		return;
+		return false;
 
 	clear_bit(idx, srq->bitmap);
 	smp_mb__after_atomic();
 	if (!llist_empty(&srq->_head[idx]))
 		set_bit(idx, srq->bitmap);
+
+	return true;
 }
 
 /*
@@ -186,7 +188,17 @@ void srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
 static __always_inline
 void srq_bucket_refill(struct sched_run_queue *srq, const int idx)
 {
-	struct llist_node *node = llist_del_all(&srq->_head[idx]);
+	struct llist_node *node;
+
+	/*
+	 * Head-insertion only yields FIFO from an empty list. Callers that may
+	 * face a populated FIFO must use srq_bucket_refill_tail(); enforce it
+	 * rather than silently ordering new tasks ahead of older ones, which
+	 * would starve them with no crash and nothing in the pick to detect it.
+	 */
+	WARN_ON_ONCE(!list_empty(&srq->_fifo[idx]));
+
+	node = llist_del_all(&srq->_head[idx]);
 
 	while (node) {
 		struct task_struct *p = llist_entry(node, struct task_struct, pq_node);
@@ -237,8 +249,11 @@ struct list_head *srq_bucket_refill_tail(struct sched_run_queue *srq, const int 
 	/*										\
 	 * Under _lock[idx] a linked pq_fifo means the pick already drained @p	\
 	 * out of the producer stack, so the unlink is an O(1) list_del().	\
-	 * Otherwise @p is still in _head[] and needs the walk -- now bounded	\
-	 * by the undrained batch rather than by the whole bucket.		\
+	 * Otherwise @p is still in _head[] and needs the walk, bounded by the	\
+	 * arrivals since the last drain -- which under sustained load still	\
+	 * approaches the bucket length. That is tolerable only because this	\
+	 * path (setaffinity, set_user_nice, wait_task_inactive, cgroup moves)	\
+	 * is orders of magnitude colder than the pick; it is not O(1).		\
 	 */										\
 	if (!list_empty(&p->pq_fifo)) {							\
 		list_del_init(&p->pq_fifo);						\
@@ -251,10 +266,9 @@ struct list_head *srq_bucket_refill_tail(struct sched_run_queue *srq, const int 
 		__modify_body__								\
 		WRITE_ONCE(p->__sched_prio, -1);					\
 		atomic_dec(&srq->nr_queued);						\
-		if (srq_bucket_empty(srq, idx))						\
+		if (srq_bucket_bit_update(srq, idx))					\
 			WARN_ONCE(task_sched_prio(p) != idx,				\
 				  "sched: srq en/dequeue bug.\n");			\
-		srq_bucket_bit_update(srq, idx);					\
 	}										\
 	__found;									\
 })
