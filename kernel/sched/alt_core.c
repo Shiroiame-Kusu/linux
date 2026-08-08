@@ -4771,18 +4771,27 @@ static void alt_sched_srq_debug(struct sched_run_queue *srq)
 	       srq_nr_queued(0), srq->bitmap[0], idx);
 
 	if (SCHED_QUEUE_BITS != idx) {
+		struct task_struct *oldest = NULL;
+		unsigned long cpus = 0, flags;
+		int sched_prio = 0, on_cpu = 0;
+
 		/*
 		 * The bucket's oldest task is the head of the consumer FIFO once
 		 * drained, otherwise the tail of the still-undrained producer
-		 * stack. Take _lock[idx]: this runs from the sched_rr_get_interval()
-		 * syscall, so an unlocked list_empty()/list_first_entry() pair
-		 * could hand back the list head cast to a task_struct.
+		 * stack. Locking is needed -- an unlocked list_empty() /
+		 * list_first_entry() pair could hand back the list head cast to a
+		 * task_struct -- but this runs from the sched_rr_get_interval()
+		 * syscall, so it must not be the one acquirer of _lock[idx] that
+		 * leaves IRQs enabled, and it must not hold the bucket every CPU's
+		 * pick_next_task() needs across a printk(). Snapshot, then print:
+		 * @oldest may be picked, run and freed once the lock is dropped,
+		 * so nothing below dereferences it.
 		 */
-		raw_spin_lock(&srq->_lock[idx]);
+		raw_spin_lock_irqsave(&srq->_lock[idx], flags);
 
 		if (!list_empty(&srq->_fifo[idx])) {
-			alt_sched_task_debug(list_first_entry(&srq->_fifo[idx],
-							     struct task_struct, pq_fifo));
+			oldest = list_first_entry(&srq->_fifo[idx],
+						  struct task_struct, pq_fifo);
 		} else {
 			struct llist_node *entry = srq->_head[idx].first;
 
@@ -4790,12 +4799,21 @@ static void alt_sched_srq_debug(struct sched_run_queue *srq)
 				while (entry->next) {
 					entry = entry->next;
 				}
-				struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
-				alt_sched_task_debug(p);
+				oldest = llist_entry(entry, struct task_struct, pq_node);
 			}
 		}
 
-		raw_spin_unlock(&srq->_lock[idx]);
+		if (oldest) {
+			sched_prio = task_sched_prio(oldest);
+			cpus = oldest->cpus_ptr->bits[0];
+			on_cpu = task_cpu(oldest);
+		}
+
+		raw_spin_unlock_irqrestore(&srq->_lock[idx], flags);
+
+		if (oldest)
+			printk(KERN_INFO "sched: task %px, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
+			       oldest, sched_prio, cpus, on_cpu);
 	}
 }
 
