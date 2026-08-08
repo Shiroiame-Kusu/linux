@@ -183,6 +183,7 @@ static inline void sched_run_queue_init(struct sched_run_queue *q)
 	for(i = 0; i < SCHED_QUEUE_BITS; i++) {
 		raw_spin_lock_init(&q->_lock[i]);
 		init_llist_head(&q->_head[i]);
+		INIT_LIST_HEAD(&q->_fifo[i]);
 	}
 	bitmap_zero(q->bitmap, SCHED_QUEUE_BITS);
 	atomic_set(&q->nr_queued, 0);
@@ -3413,6 +3414,7 @@ static inline void __sched_fork(u64 clone_flags, struct task_struct *p)
 	p->stime			= 0;
 	p->sched_time			= 0;
 	p->pq_node.next			= NULL;
+	INIT_LIST_HEAD(&p->pq_fifo);
 	p->__sched_prio			= -1;
 
 #ifdef CONFIG_SCHEDSTATS
@@ -4769,15 +4771,31 @@ static void alt_sched_srq_debug(struct sched_run_queue *srq)
 	       srq_nr_queued(0), srq->bitmap[0], idx);
 
 	if (SCHED_QUEUE_BITS != idx) {
-		struct llist_node *entry = srq->_head[idx].first;
+		/*
+		 * The bucket's oldest task is the head of the consumer FIFO once
+		 * drained, otherwise the tail of the still-undrained producer
+		 * stack. Take _lock[idx]: this runs from the sched_rr_get_interval()
+		 * syscall, so an unlocked list_empty()/list_first_entry() pair
+		 * could hand back the list head cast to a task_struct.
+		 */
+		raw_spin_lock(&srq->_lock[idx]);
 
-		if (entry) {
-			while (entry->next) {
-				entry = entry->next;
+		if (!list_empty(&srq->_fifo[idx])) {
+			alt_sched_task_debug(list_first_entry(&srq->_fifo[idx],
+							     struct task_struct, pq_fifo));
+		} else {
+			struct llist_node *entry = srq->_head[idx].first;
+
+			if (entry) {
+				while (entry->next) {
+					entry = entry->next;
+				}
+				struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
+				alt_sched_task_debug(p);
 			}
-			struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
-			alt_sched_task_debug(p);
 		}
+
+		raw_spin_unlock(&srq->_lock[idx]);
 	}
 }
 
@@ -4990,50 +5008,65 @@ static __always_inline int wakeup_srq_task(const int cpu)
 	int strand_idx = -1;	/* bucket of a task runnable on @cpu; drives the re-pick */
 
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
-		struct llist_head *head = &srq->_head[idx];
-		struct llist_node *entry, *first;
 		raw_spinlock_t *lock = &srq->_lock[idx];
+		struct task_struct *p;
+		int preempt_idx, j;
 
 		raw_spin_lock(lock);
-		/*
-		 * Read-only scan of the live bucket. We hold _lock[idx], so no
-		 * dequeue or relink can run concurrently -- every remover
-		 * (pick_next_task()'s PQ_PICK_TASK, __task_modify_lock()'s
-		 * SRQ_DEQUEUE_TASK, both via sched_llist_unlink()) takes this
-		 * same lock. The only lock-free writer is SRQ_ENQUEUE_TASK()'s
-		 * llist_add(), which just prepends and never rewrites an
-		 * existing node's ->next, so a walk from this snapshot is
-		 * stable.
-		 */
-		first = READ_ONCE(head->first);
-		if (unlikely(NULL == first)) {
-			if (llist_empty(head)) {
-				clear_bit(idx, srq->bitmap);
-				smp_mb__after_atomic();
-				if (!llist_empty(head))
-					set_bit(idx, srq->bitmap);
-			}
+
+		if (list_empty(&srq->_fifo[idx]))
+			srq_bucket_refill(srq, idx);
+
+		if (unlikely(list_empty(&srq->_fifo[idx]))) {
+			/* Stale bitmap bit: bucket emptied by a dequeue-side path. */
+			srq_bucket_bit_update(srq, idx);
 			raw_spin_unlock(lock);
 			continue;
 		}
 
-		llist_for_each(entry, first) {
-			struct task_struct *p = llist_entry(entry, struct task_struct, pq_node);
-			int i;
+		/*
+		 * Kick target: only the bucket's oldest task is consulted. A CPU
+		 * on its way to idle needs *a* CPU to kick, not the globally best
+		 * one, and the full walk this replaces cost O(queued x nr_cpus)
+		 * with a remote cpu_prio() line read per pair, under this lock.
+		 *
+		 * No staleness check is needed on a _fifo[] entry: membership is
+		 * only ever changed under _lock[idx], which we hold.
+		 */
+		p = list_first_entry(&srq->_fifo[idx], struct task_struct, pq_fifo);
 
-			if (!task_on_rq_queued(p) || idx != READ_ONCE(p->__sched_prio))
-				continue;
+		/*
+		 * strand_idx must keep its full meaning -- *any* task in this
+		 * bucket runnable on @cpu -- or the caller idles next to work it
+		 * could have run, which is the stall this scan exists to catch.
+		 * Same early exit as the pick: the first entry answers it unless
+		 * the head is explicitly restricted away from @cpu.
+		 */
+		if (strand_idx < 0) {
+			struct task_struct *q;
 
-			if (strand_idx < 0 && is_cpu_allowed(p, cpu))
-				strand_idx = idx;
-
-			for_each_cpu_and(i, p->cpus_ptr, cpu_active_mask) {
-				if (i == cpu || !is_cpu_allowed(p, i))
-					continue;
-				if (idx < READ_ONCE(cpu_prio(i))) {
-					kick_cpu = i;
+			list_for_each_entry(q, &srq->_fifo[idx], pq_fifo)
+				if (is_cpu_allowed(q, cpu)) {
+					strand_idx = idx;
 					break;
 				}
+		}
+
+		/*
+		 * Bucket @idx can preempt exactly those CPUs sitting at a level
+		 * below its own -- the candidate rule __wakeup_rq_trylock() uses.
+		 * Read that off the shared level masks rather than polling every
+		 * CPU's own cpu_prio line.
+		 */
+		preempt_idx = SCHED_LEVELS - 1 - idx;
+		for_each_set_bit(j, cpu_sched_prio_bitmap, preempt_idx) {
+			int i;
+
+			for_each_cpu_and(i, p->cpus_ptr, cpu_sched_prio_mask + j) {
+				if (i == cpu || !is_cpu_allowed(p, i))
+					continue;
+				kick_cpu = i;
+				break;
 			}
 			if (kick_cpu < nr_cpu_ids)
 				break;
@@ -5053,59 +5086,64 @@ static __always_inline int wakeup_srq_task(const int cpu)
 }
 
 /*
- * Pick the oldest eligible task from a grq bucket. The bucket llist is
- * LIFO (llist_add() prepends), so the last eligible node of a walk is the
- * oldest -- FIFO fairness without detaching the list. We hold _lock[idx],
- * which serializes all removers; the only concurrent writer is the
- * lock-free llist_add(), which just prepends: interior ->next pointers are
- * stable, and only an unlink at the head must cmpxchg (see
- * sched_llist_unlink()). This replaces the historical llist_del_all() +
- * two llist_reverse_order() passes + re-merge, which rewrote every node's
- * ->next three times per pick and could spin re-merging against concurrent
- * enqueues while the bucket lock was held.
+ * Pick the oldest eligible task from a grq bucket, holding _lock[idx].
+ *
+ * The producer stack _head[] is LIFO (llist_add() prepends), so reading FIFO
+ * order out of it meant walking to its tail -- unconditionally O(bucket
+ * length) on every pick, with no early exit, and bucket length is exactly
+ * what oversubscription grows. Every same-nice CPU-bound task converges into
+ * one bucket, so that walk was the whole scheduler serialising on one lock.
+ *
+ * The consumer FIFO _fifo[] inverts the query: its head is the oldest task,
+ * so the oldest *eligible* task is the first hit walking forward, and the
+ * walk stops on entry one. It only fails on tasks restricted to a subset of
+ * CPUs -- tasks pinned to exactly one CPU never reach the grq at all, they
+ * are diverted to the per-CPU preempt lists.
  */
 #define PQ_PICK_TASK										\
 {												\
-	struct llist_node *first = READ_ONCE(head->first);					\
-	struct llist_node *node, *prev_node = NULL, *cand = NULL, *cand_prev = NULL;		\
+	struct list_head *fifo = &srq->_fifo[idx];						\
+	struct task_struct *cand = NULL;							\
+	struct task_struct *p;									\
 												\
-	for (node = first; node; prev_node = node, node = node->next) {				\
-		struct task_struct *p = llist_entry(node, struct task_struct, pq_node);	\
+	if (list_empty(fifo))									\
+		srq_bucket_refill(srq, idx);							\
+												\
+	list_for_each_entry(p, fifo, pq_fifo)							\
 		if (is_cpu_allowed(p, cpu)) {							\
-			cand = node;								\
-			cand_prev = prev_node;							\
+			cand = p;								\
+			break;									\
+		}										\
+												\
+	if (!cand && !llist_empty(&srq->_head[idx])) {						\
+		/*										\
+		 * The FIFO holds only tasks restricted away from @cpu; arrivals	\
+		 * behind them may still be runnable here.				\
+		 */										\
+		struct list_head *pos = srq_bucket_refill_tail(srq, idx);			\
+												\
+		for (; pos && pos != fifo; pos = pos->next) {					\
+			p = list_entry(pos, struct task_struct, pq_fifo);			\
+			if (is_cpu_allowed(p, cpu)) {						\
+				cand = p;							\
+				break;								\
+			}									\
 		}										\
 	}											\
+												\
 	if (cand) {										\
-		if (cand_prev) {								\
-			cand_prev->next = cand->next;						\
-		} else if (!try_cmpxchg(&head->first, &first, cand->next)) {			\
-			/* llist_add() prepended; find cand's new predecessor. */		\
-			for (node = first; node->next != cand; node = node->next)		\
-				;								\
-			node->next = cand->next;						\
-		}										\
-		cand->next = NULL;								\
-		next = llist_entry(cand, struct task_struct, pq_node);				\
-		if (llist_empty(head)) {							\
-			clear_bit(idx, srq->bitmap);						\
-			smp_mb__after_atomic();							\
-			if (!llist_empty(head))							\
-				set_bit(idx, srq->bitmap);					\
-		}										\
+		list_del_init(&cand->pq_fifo);							\
+		next = cand;									\
 		if (task_cpu(next) != cpu)							\
 			set_task_cpu(next, cpu);						\
 		WRITE_ONCE(next->__sched_prio, -1);						\
 		atomic_dec(&srq->nr_queued);							\
+		srq_bucket_bit_update(srq, idx);						\
 		raw_spin_unlock(lock);								\
 		goto picked;									\
-	} else if (!first && llist_empty(head)) {						\
-		/* Stale bitmap bit: bucket emptied by a dequeue-side path. */			\
-		clear_bit(idx, srq->bitmap);							\
-		smp_mb__after_atomic();								\
-		if (!llist_empty(head))								\
-			set_bit(idx, srq->bitmap);						\
 	}											\
+	/* Nothing runnable here, or a stale bit left by a dequeue-side path. */		\
+	srq_bucket_bit_update(srq, idx);							\
 }
 
 static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, int expired)
@@ -5133,12 +5171,12 @@ repick:
 		 * priority inversion on every pick that raced a bucket lock
 		 * (RT behind nice-0). Trylock while uncontended; on the first
 		 * contended bucket fall through to plain locking from that
-		 * point on. Bucket hold times are short (in-place unlink), so
-		 * waiting beats picking the wrong task.
+		 * point on. Bucket hold times are short (an amortised O(1) pop
+		 * off the consumer FIFO), so waiting beats picking the wrong
+		 * task.
 		 */
 		for_each_set_bit(idx, srq->bitmap, pick_sched_prio) {
 			raw_spinlock_t	*lock = &srq->_lock[idx];
-			struct llist_head *head = &srq->_head[idx];
 
 			if (!raw_spin_trylock(lock))
 				break;
@@ -5149,7 +5187,6 @@ repick:
 		if (idx < pick_sched_prio) {
 			for_each_set_bit_from(idx, srq->bitmap, pick_sched_prio) {
 				raw_spinlock_t	*lock = &srq->_lock[idx];
-				struct llist_head *head = &srq->_head[idx];
 
 				raw_spin_lock(lock);
 				PQ_PICK_TASK;
