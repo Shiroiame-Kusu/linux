@@ -5010,12 +5010,21 @@ static __always_inline int wakeup_srq_task(const int cpu)
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		raw_spinlock_t *lock = &srq->_lock[idx];
 		struct task_struct *p;
-		int preempt_idx, j;
+		int preempt_idx;
 
 		raw_spin_lock(lock);
 
+		/*
+		 * Drain unconditionally. Both answers this function owes its
+		 * caller -- the kick target and strand_idx -- have to cover newly
+		 * arrived tasks and not just already-drained ones; the picker
+		 * makes the same guarantee through its tail-refill fallback.
+		 * Draining is amortised once per task either way.
+		 */
 		if (list_empty(&srq->_fifo[idx]))
 			srq_bucket_refill(srq, idx);
+		else if (!llist_empty(&srq->_head[idx]))
+			srq_bucket_refill_tail(srq, idx);
 
 		if (unlikely(list_empty(&srq->_fifo[idx]))) {
 			/* Stale bitmap bit: bucket emptied by a dequeue-side path. */
@@ -5025,49 +5034,40 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		}
 
 		/*
-		 * Kick target: only the bucket's oldest task is consulted. A CPU
-		 * on its way to idle needs *a* CPU to kick, not the globally best
-		 * one, and the full walk this replaces cost O(queued x nr_cpus)
-		 * with a remote cpu_prio() line read per pair, under this lock.
-		 *
-		 * No staleness check is needed on a _fifo[] entry: membership is
-		 * only ever changed under _lock[idx], which we hold.
-		 */
-		p = list_first_entry(&srq->_fifo[idx], struct task_struct, pq_fifo);
-
-		/*
-		 * strand_idx must keep its full meaning -- *any* task in this
-		 * bucket runnable on @cpu -- or the caller idles next to work it
-		 * could have run, which is the stall this scan exists to catch.
-		 * Same early exit as the pick: the first entry answers it unless
-		 * the head is explicitly restricted away from @cpu.
-		 */
-		if (strand_idx < 0) {
-			struct task_struct *q;
-
-			list_for_each_entry(q, &srq->_fifo[idx], pq_fifo)
-				if (is_cpu_allowed(q, cpu)) {
-					strand_idx = idx;
-					break;
-				}
-		}
-
-		/*
 		 * Bucket @idx can preempt exactly those CPUs sitting at a level
 		 * below its own -- the candidate rule __wakeup_rq_trylock() uses.
-		 * Read that off the shared level masks rather than polling every
-		 * CPU's own cpu_prio line.
+		 * Reading that off the shared level masks is what removes the old
+		 * scan's O(queued x nr_cpus) remote cpu_prio() cacheline reads.
+		 *
+		 * Affinity still varies per task, though: a restricted head can
+		 * yield no candidate where a later same-priority task does. Walk
+		 * until one is found, exactly as the old scan did, and accumulate
+		 * strand_idx along the way -- narrowing either to the head alone
+		 * would let the caller idle next to work it could have run. No
+		 * staleness check is needed on a _fifo[] entry: membership only
+		 * ever changes under _lock[idx], which we hold.
 		 */
 		preempt_idx = SCHED_LEVELS - 1 - idx;
-		for_each_set_bit(j, cpu_sched_prio_bitmap, preempt_idx) {
-			int i;
 
-			for_each_cpu_and(i, p->cpus_ptr, cpu_sched_prio_mask + j) {
-				if (i == cpu || !is_cpu_allowed(p, i))
-					continue;
-				kick_cpu = i;
-				break;
+		list_for_each_entry(p, &srq->_fifo[idx], pq_fifo) {
+			int j;
+
+			if (strand_idx < 0 && is_cpu_allowed(p, cpu))
+				strand_idx = idx;
+
+			for_each_set_bit(j, cpu_sched_prio_bitmap, preempt_idx) {
+				int i;
+
+				for_each_cpu_and(i, p->cpus_ptr, cpu_sched_prio_mask + j) {
+					if (i == cpu || !is_cpu_allowed(p, i))
+						continue;
+					kick_cpu = i;
+					break;
+				}
+				if (kick_cpu < nr_cpu_ids)
+					break;
 			}
+
 			if (kick_cpu < nr_cpu_ids)
 				break;
 		}
