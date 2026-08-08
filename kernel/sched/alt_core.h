@@ -161,17 +161,15 @@ bool srq_bucket_empty(struct sched_run_queue *srq, const int idx)
  * under _lock[idx].
  */
 static __always_inline
-bool srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
+void srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
 {
 	if (!srq_bucket_empty(srq, idx))
-		return false;
+		return;
 
 	clear_bit(idx, srq->bitmap);
 	smp_mb__after_atomic();
 	if (!llist_empty(&srq->_head[idx]))
 		set_bit(idx, srq->bitmap);
-
-	return true;
 }
 
 /*
@@ -242,12 +240,27 @@ struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx
 	}										\
 											\
 	if (__found) {									\
+		/*									\
+		 * @p's bucket must still be the one its priority maps to --	\
+		 * a property of @p, not of the bucket, so check it on every	\
+		 * dequeue rather than only when @idx happens to drain (which	\
+		 * sampled an arbitrary subset). Priority cannot drift while @p	\
+		 * sits on a bucket: every p->prio writer (set_user_nice,	\
+		 * __sched_setscheduler, rt_mutex_setprio) runs under		\
+		 * task_access_lock/__task_modify_lock, whose queued path comes	\
+		 * through this very macro and re-enqueues via			\
+		 * wakeup_modified_task(); the BMQ boost helpers only touch a	\
+		 * running or a not-yet-queued waking task. Note it is the	\
+		 * modify *lock* that does this -- sched_change_begin() only	\
+		 * records state under SCHED_ALT and dequeues nothing.		\
+		 * task_sched_prio() is two loads and some arithmetic, on lines	\
+		 * this macro just touched.					\
+		 */									\
+		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
 		__modify_body__								\
 		WRITE_ONCE(p->__sched_prio, -1);					\
 		atomic_dec(&srq->nr_queued);						\
-		if (srq_bucket_bit_update(srq, idx))					\
-			WARN_ONCE(task_sched_prio(p) != idx,				\
-				  "sched: srq en/dequeue bug.\n");			\
+		srq_bucket_bit_update(srq, idx);					\
 	}										\
 	__found;									\
 })
