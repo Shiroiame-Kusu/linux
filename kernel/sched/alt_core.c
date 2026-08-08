@@ -5040,16 +5040,16 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		raw_spin_lock(lock);
 
 		/*
-		 * Drain unconditionally. Both answers this function owes its
-		 * caller -- the kick target and strand_idx -- have to cover newly
-		 * arrived tasks and not just already-drained ones; the picker
-		 * makes the same guarantee through its tail-refill fallback.
-		 * Draining is amortised once per task either way.
+		 * Drain whenever anything has arrived. Both answers this function
+		 * owes its caller -- the kick target and strand_idx -- have to cover
+		 * newly arrived tasks and not just already-drained ones; the picker
+		 * makes the same guarantee through its refill fallback. Draining is
+		 * amortised once per task either way, and gating on _head[] keeps
+		 * the llist_del_all() xchg off a contended cacheline when there is
+		 * nothing to move.
 		 */
-		if (list_empty(&srq->_fifo[idx]))
+		if (!llist_empty(&srq->_head[idx]))
 			srq_bucket_refill(srq, idx);
-		else if (!llist_empty(&srq->_head[idx]))
-			srq_bucket_refill_tail(srq, idx);
 
 		if (unlikely(list_empty(&srq->_fifo[idx]))) {
 			/* Stale bitmap bit: bucket emptied by a dequeue-side path. */
@@ -5143,17 +5143,17 @@ static __always_inline int wakeup_srq_task(const int cpu)
 	if (!cand && !llist_empty(&srq->_head[idx])) {						\
 		/*										\
 		 * The FIFO holds only tasks restricted away from @cpu; arrivals	\
-		 * behind them may still be runnable here.				\
+		 * behind them may still be runnable here. Resume at the first of	\
+		 * them rather than re-walking the ineligible ones.			\
 		 */										\
-		struct list_head *pos = srq_bucket_refill_tail(srq, idx);			\
+		p = srq_bucket_refill(srq, idx);						\
 												\
-		for (; pos && pos != fifo; pos = pos->next) {					\
-			p = list_entry(pos, struct task_struct, pq_fifo);			\
-			if (is_cpu_allowed(p, cpu)) {						\
-				cand = p;							\
-				break;								\
-			}									\
-		}										\
+		if (p)										\
+			list_for_each_entry_from(p, fifo, pq_fifo)				\
+				if (is_cpu_allowed(p, cpu)) {					\
+					cand = p;						\
+					break;							\
+				}								\
 	}											\
 												\
 	if (cand) {										\
