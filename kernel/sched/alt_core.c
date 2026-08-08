@@ -4757,9 +4757,15 @@ static inline void alt_sched_rq_debug(struct rq *rq)
 	       cpu, rq->nr_pinned, READ_ONCE(cpu_prio(cpu)));
 }
 
+/*
+ * %p, not %px: alt_sched_debug() is reachable from sched_rr_get_interval(2)
+ * by any user, and an unhashed task_struct address there is a straight
+ * kernel-heap disclosure. The hash is stable within a boot, so pointers
+ * remain correlatable across these lines for debugging.
+ */
 static inline void alt_sched_task_debug(struct task_struct *p)
 {
-	printk(KERN_INFO "sched: task %px, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
+	printk(KERN_INFO "sched: task %p, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
 	       p, task_sched_prio(p), p->cpus_ptr->bits[0], task_cpu(p));
 }
 
@@ -4811,8 +4817,9 @@ static void alt_sched_srq_debug(struct sched_run_queue *srq)
 
 		raw_spin_unlock_irqrestore(&srq->_lock[idx], flags);
 
+		/* %p rather than %px: see alt_sched_task_debug(). */
 		if (oldest)
-			printk(KERN_INFO "sched: task %px, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
+			printk(KERN_INFO "sched: task %p, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
 			       oldest, sched_prio, cpus, on_cpu);
 	}
 }
