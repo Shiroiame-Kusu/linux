@@ -875,6 +875,14 @@ struct task_struct {
 	u64				last_ran;
 	s64				time_slice;
 	struct llist_node		pq_node;
+	/*
+	 * GRQ bucket membership has two representations: the lock-free
+	 * producer stack (pq_node on srq->_head[]) and the consumer FIFO
+	 * (pq_fifo on srq->_fifo[]) the pick drains it into. A task is in
+	 * exactly one of them, so under srq->_lock[] a non-empty pq_fifo
+	 * is the discriminator -- see SRQ_DEQUEUE_TASK().
+	 */
+	struct list_head		pq_fifo;
 	int				__sched_prio;
 #ifdef CONFIG_SCHED_BMQ
 	int				boost_prio;

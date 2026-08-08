@@ -125,6 +125,7 @@ struct task_struct init_task __aligned(L1_CACHE_BYTES) = {
 	},
 #ifdef CONFIG_SCHED_ALT
 	.pq_node	= { NULL },
+	.pq_fifo	= LIST_HEAD_INIT(init_task.pq_fifo),
 	.__sched_prio	= -1,
 #ifdef CONFIG_SCHED_BMQ
 	.boost_prio	= 0,
