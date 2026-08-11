@@ -619,7 +619,7 @@ static int inet_csk_wait_for_connect(struct sock *sk, long timeo)
 	 * having to remove and re-insert us on the wait queue.
 	 */
 	for (;;) {
-		prepare_to_wait_exclusive_lifo(sk_sleep(sk), &wait,
+		prepare_to_wait_exclusive(sk_sleep(sk), &wait,
 					  TASK_INTERRUPTIBLE);
 		release_sock(sk);
 		if (reqsk_queue_empty(&icsk->icsk_accept_queue))
@@ -1285,6 +1285,7 @@ EXPORT_SYMBOL(inet_csk_destroy_sock);
 void inet_csk_prepare_for_destroy_sock(struct sock *sk)
 {
 	/* The below has to be done to allow calling inet_csk_destroy_sock */
+	tcp_clear_sock_ops_cb_flags(sk);
 	sock_set_flag(sk, SOCK_DEAD);
 	tcp_orphan_count_inc();
 }

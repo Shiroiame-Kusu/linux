@@ -24,7 +24,6 @@
  */
 
 #include <linux/acpi.h>
-#include <linux/dmi.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
@@ -813,106 +812,6 @@ static void acpi_tad_remove(void *data)
 	pm_runtime_disable(dev);
 }
 
-static const struct dmi_system_id t2_devices[] = {
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,3"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,4"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,3"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,4"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookAir8,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookAir8,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookAir9,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Macmini8,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacPro7,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "iMac20,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "iMac20,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "iMacPro1,1"),
-		},
-	},
-	{ }
-};
-
 static int acpi_tad_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -926,8 +825,6 @@ static int acpi_tad_probe(struct platform_device *pdev)
 	if (!handle)
 		return -ENODEV;
 
-	if (IS_ENABLED(CONFIG_RTC_DRV_MACSMC) && dmi_first_match(t2_devices))
-		return -ENODEV;
 	/*
 	 * Initialization failure messages are mostly about firmware issues, so
 	 * print them at the "info" level.
@@ -959,7 +856,7 @@ static int acpi_tad_probe(struct platform_device *pdev)
 	 * runtime suspend.  Everything else should be taken care of by the ACPI
 	 * PM domain callbacks.
 	 */
-	if (ACPI_TAD_AC_WAKE) {
+	if (caps & ACPI_TAD_AC_WAKE) {
 		device_init_wakeup(dev, true);
 		dev_pm_set_driver_flags(dev, DPM_FLAG_SMART_SUSPEND |
 					     DPM_FLAG_MAY_SKIP_RESUME);
