@@ -926,106 +926,6 @@ static inline void cmos_check_acpi_rtc_status(struct device *dev,
 #define SECS_PER_MONTH	(28 * SECS_PER_DAY)
 #define SECS_PER_YEAR	(365 * SECS_PER_DAY)
 
-static const struct dmi_system_id t2_devices[] = {
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,3"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro15,4"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,3"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookPro16,4"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookAir8,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookAir8,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacBookAir9,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "Macmini8,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "MacPro7,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "iMac20,1"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "iMac20,2"),
-		},
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "Apple Inc."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "iMacPro1,1"),
-		},
-	},
-	{ }
-};
-
 static int INITSECTION
 cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 {
@@ -1034,6 +934,7 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 	unsigned char			rtc_control;
 	unsigned			address_space;
 	u32				flags = 0;
+	bool				hpet_registered = false;
 	struct nvmem_config nvmem_cfg = {
 		.name = "cmos_nvram",
 		.word_size = 1,
@@ -1048,14 +949,6 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 		return -EBUSY;
 
 	if (!ports)
-		return -ENODEV;
-
-	/*
-	 * On t2 devices, ACPI RTC exists but ACPI is
-	 * very buggy, so use a better alternative and turn
-	 * off rtc-cmos
-	 */
-	if (IS_ENABLED(CONFIG_RTC_DRV_MACSMC) && dmi_first_match(t2_devices))
 		return -ENODEV;
 
 	/* Claim I/O ports ASAP, minimizing conflict with legacy driver.
@@ -1199,6 +1092,7 @@ cmos_do_probe(struct device *dev, struct resource *ports, int rtc_irq)
 						" failed in rtc_init().");
 				goto cleanup1;
 			}
+			hpet_registered = true;
 		} else
 			rtc_cmos_int_handler = cmos_interrupt;
 
@@ -1248,6 +1142,10 @@ cleanup2:
 	if (is_valid_irq(rtc_irq))
 		free_irq(rtc_irq, cmos_rtc.rtc);
 cleanup1:
+	if (hpet_registered) {
+		hpet_mask_rtc_irq_bit(RTC_IRQMASK);
+		hpet_unregister_irq_handler(cmos_interrupt);
+	}
 	cmos_rtc.dev = NULL;
 cleanup0:
 	if (RTC_IOMAPPED)
