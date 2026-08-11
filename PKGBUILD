@@ -3,11 +3,11 @@
 _pkgsuffix="cachyos-lfbmq-hakuu-tlto-expr"
 pkgbase="linux-$_pkgsuffix"
 _major=7.1
-_minor=3
+_minor=8
 pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
-pkgrel=5
+pkgrel=1
 pkgdesc='Linux CachyOS Kernel (pre-configured build) by Hakuu'
 arch=('x86_64')
 url="https://github.com/CachyOS/linux-cachyos"
