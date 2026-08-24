@@ -1094,6 +1094,23 @@ static int vtime_state_fetch(struct vtime *vtime, int cpu)
 	return state;
 }
 
+#ifdef CONFIG_SCHED_ALT
+/*
+ * LFBMQ accounts iowait on the shared runqueue, not on the per-CPU rq, so
+ * there is no rq->nr_iowait to dereference. nr_iowait_cpu() is the accessor
+ * that knows where the counter actually lives.
+ */
+static inline unsigned int rq_nr_iowait(struct rq *rq, int cpu)
+{
+	return nr_iowait_cpu(cpu);
+}
+#else /* !CONFIG_SCHED_ALT: */
+static inline unsigned int rq_nr_iowait(struct rq *rq, int cpu)
+{
+	return atomic_read(&rq->nr_iowait);
+}
+#endif /* !CONFIG_SCHED_ALT */
+
 static u64 kcpustat_user_vtime(struct vtime *vtime)
 {
 	if (vtime->state == VTIME_USER)
@@ -1152,11 +1169,11 @@ static int kcpustat_field_vtime(u64 *cpustat,
 				*val += vtime->gtime + vtime_delta(vtime);
 			break;
 		case CPUTIME_IDLE:
-			if (state == VTIME_IDLE && !atomic_read(&rq->nr_iowait))
+			if (state == VTIME_IDLE && !rq_nr_iowait(rq, cpu))
 				*val += vtime_delta(vtime);
 			break;
 		case CPUTIME_IOWAIT:
-			if (state == VTIME_IDLE && atomic_read(&rq->nr_iowait) > 0)
+			if (state == VTIME_IDLE && rq_nr_iowait(rq, cpu) > 0)
 				*val += vtime_delta(vtime);
 			break;
 		default:
@@ -1251,7 +1268,7 @@ static int kcpustat_cpu_fetch_vtime(struct kernel_cpustat *dst,
 			}
 			break;
 		case VTIME_IDLE:
-			if (atomic_read(&cpu_rq(cpu)->nr_iowait) > 0)
+			if (rq_nr_iowait(cpu_rq(cpu), cpu) > 0)
 				cpustat[CPUTIME_IOWAIT] += delta;
 			else
 				cpustat[CPUTIME_IDLE] += delta;
