@@ -952,6 +952,7 @@ config SCHED_PROXY_EXEC
 	depends on !SCHED_CLASS_EXT
 	# Not particularly useful until we get to multi-rq proxying
 	depends on EXPERT
+	depends on !SCHED_ALT
 	help
 	  This option enables proxy execution, a mechanism for mutex-owning
 	  tasks to inherit the scheduling context of higher priority waiters.
@@ -1069,6 +1070,7 @@ config SCHED_CACHE
 	bool "Cache aware load balance"
 	default y
 	depends on SMP
+	depends on !SCHED_ALT
 	help
 	  When enabled, the scheduler will attempt to aggregate tasks from
 	  the same process onto a single Last Level Cache (LLC) domain when
