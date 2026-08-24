@@ -18,6 +18,19 @@
  * Acknowledgements:
  *   This work is heavily inspired by RitzDaCat's scx_cake scheduler.
  *
+ *   The select_idle_sibling() restructuring on which the POC fast
+ *   path depends (is_idle_core() helper, @sync parameter, hoisting
+ *   the recent_used_cpu check to the function top, switching the
+ *   target fast-return to is_idle_core()) is adapted from:
+ *
+ *     Andrea Righi, Mario Roy, and Eric Naim
+ *     ("sched/fair: Prefer the previous cpu for wakeup")
+ *
+ *       - Andrea Righi: is_idle_core() helper and idle-core
+ *         target selection in select_idle_sibling()
+ *       - Mario Roy: prev-cpu preference and recent_used_cpu
+ *         hoisting with idle-core check
+ *
  *   Special thanks to the algorithm inventors whose research enabled
  *   the O(1) techniques used in this implementation:
  *

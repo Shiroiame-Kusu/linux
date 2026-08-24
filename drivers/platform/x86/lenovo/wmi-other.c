@@ -644,7 +644,7 @@ static int lwmi_psy_ext_get_prop(struct power_supply *ps,
 		val->intval = POWER_SUPPLY_CHARGE_TYPE_STANDARD;
 		break;
 	default:
-		dev_err(&priv->wdev->dev, "Got invalid charge limit value: %#x\n", retval);
+		dev_err(&priv->wdev->dev, "Got invalid charge types value: %#x\n", retval);
 		return -EINVAL;
 	}
 
@@ -701,7 +701,7 @@ static int lwmi_psy_ext_set_prop(struct power_supply *ps,
 			args.arg1 = LWMI_CHARGE_TYPE_STANDARD;
 			break;
 		default:
-			dev_err(&priv->wdev->dev, "Got invalid charge limit value: %#x\n",
+			dev_err(&priv->wdev->dev, "Got invalid charge types value: %#x\n",
 				val->intval);
 			return -EINVAL;
 		}
@@ -721,9 +721,9 @@ static int lwmi_psy_ext_set_prop(struct power_supply *ps,
  * @priv: Pointer to the lwmi_om_priv drvdata
  * @prop: The power supply property to be evaluated
  *
- * Return: capability data support level, or an error
+ * Return: bitmapped capability data support level
  */
-static int lwmi_psy_prop_get_supported(struct lwmi_om_priv *priv, enum power_supply_property prop)
+static u32 lwmi_psy_prop_get_supported(struct lwmi_om_priv *priv, enum power_supply_property prop)
 {
 	struct capdata00 capdata;
 	u32 attribute_id;
@@ -739,12 +739,12 @@ static int lwmi_psy_prop_get_supported(struct lwmi_om_priv *priv, enum power_sup
 						LWMI_TYPE_ID_PSU_AC);
 		break;
 	default:
-		return -EINVAL;
+		return 0;
 	}
 
 	ret = lwmi_cd00_get_data(priv->cd00_list, attribute_id, &capdata);
 	if (ret)
-		return ret;
+		return 0;
 
 	dev_dbg(&priv->wdev->dev, "Battery charge feature (%#010x) support level: %#x\n",
 		attribute_id, capdata.supported);

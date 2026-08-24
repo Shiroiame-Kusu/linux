@@ -147,8 +147,7 @@ SD_FLAG(SD_ASYM_PACKING, SDF_NEEDS_GROUPS)
  * Prefer to place tasks in a sibling domain
  *
  * Set up until domains start spanning NUMA nodes. Close to being a SHARED_CHILD
- * flag, but cleared below domains with SD_ASYM_CPUCAPACITY if the domain does
- * not have clusters of CPUs sharing cache.
+ * flag, but cleared below domains with SD_ASYM_CPUCAPACITY.
  *
  * NEEDS_GROUPS: Load balancing flag.
  */
