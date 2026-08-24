@@ -58,12 +58,6 @@ enum drm_connector_force {
 	DRM_FORCE_ON_DIGITAL, /* for DVI-I use digital connector */
 };
 
-enum drm_allm_mode {
-	DRM_ALLM_MODE_DISABLED,
-	DRM_ALLM_MODE_ENABLED_DYNAMIC,
-	DRM_ALLM_MODE_ENABLED_FORCED,
-};
-
 /**
  * enum drm_connector_status - status for a &drm_connector
  *
@@ -1157,8 +1151,8 @@ struct drm_connector_state {
 	 */
 	enum drm_link_status link_status;
 
-	/** @state: backpointer to global drm_atomic_state */
-	struct drm_atomic_state *state;
+	/** @state: backpointer to global drm_atomic_commit */
+	struct drm_atomic_commit *state;
 
 	/**
 	 * @commit: Tracks the pending commit to prevent use-after-free conditions.
@@ -1218,13 +1212,6 @@ struct drm_connector_state {
 	 * protection. This is most commonly used for HDCP.
 	 */
 	unsigned int content_protection;
-
-	/**
-	 * @allm_mode: Connector property to control the
-	 * HDMI Auto Low Latency Mode trigger setting.
-	 * The %DRM_ALLM_MODE_\* values must match the values.
-	 */
-	enum drm_allm_mode allm_mode;
 
 	/**
 	 * @colorspace: State variable for Connector property to request
@@ -2226,26 +2213,6 @@ struct drm_connector {
 	struct drm_property *vrr_capable_property;
 
 	/**
-	 * @allm_capable_property: Optional property to help userspace
-	 * query hardware support for HDMI Auto Low Latency Mode on a connector.
-	 * Drivers can add the property to a connector by calling
-	 * drm_connector_attach_allm_capable_property().
-	 *
-	 * This should be updated only by calling
-	 * drm_connector_set_allm_capable_property().
-	 */
-	struct drm_property *allm_capable_property;
-
-	/**
-	 * @allm_mode_property:
-	 *
-	 * Indicates HDMI Auto Low Latency Mode triggering mode for connector.
-	 * Support for the requested state will depend on driver and hardware
-	 * capabiltiy - lacking support is not treated as failure.
-	 */
-	struct drm_property *allm_mode_property;
-
-	/**
 	 * @colorspace_property: Connector property to set the suitable
 	 * colorspace supported by the sink.
 	 */
@@ -2430,7 +2397,7 @@ struct drm_connector {
 	 *
 	 * This is protected by &drm_mode_config.connection_mutex. Note that
 	 * nonblocking atomic commits access the current connector state without
-	 * taking locks. Either by going through the &struct drm_atomic_state
+	 * taking locks. Either by going through the &struct drm_atomic_commit
 	 * pointers, see for_each_oldnew_connector_in_state(),
 	 * for_each_old_connector_in_state() and
 	 * for_each_new_connector_in_state(). Or through careful ordering of
@@ -2640,11 +2607,9 @@ int drm_connector_attach_scaling_mode_property(struct drm_connector *connector,
 int drm_connector_attach_vrr_capable_property(
 		struct drm_connector *connector);
 void drm_connector_attach_panel_type_property(struct drm_connector *connector);
-int drm_connector_attach_allm_capable_property(struct drm_connector *connector);
-int drm_connector_attach_allm_mode_property(struct drm_connector *connector);
 int drm_connector_attach_broadcast_rgb_property(struct drm_connector *connector);
 int drm_connector_attach_colorspace_property(struct drm_connector *connector);
-int drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
+void drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
 bool drm_connector_atomic_hdr_metadata_equal(struct drm_connector_state *old_state,
 					     struct drm_connector_state *new_state);
 int drm_mode_create_aspect_ratio_property(struct drm_device *dev);
@@ -2663,8 +2628,6 @@ int drm_connector_update_edid_property(struct drm_connector *connector,
 void drm_connector_set_link_status_property(struct drm_connector *connector,
 					    uint64_t link_status);
 void drm_connector_set_vrr_capable_property(
-		struct drm_connector *connector, bool capable);
-void drm_connector_set_allm_capable_property(
 		struct drm_connector *connector, bool capable);
 int drm_connector_set_panel_orientation(
 	struct drm_connector *connector,

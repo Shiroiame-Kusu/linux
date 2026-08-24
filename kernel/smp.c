@@ -830,8 +830,9 @@ int smp_task_ipi_mask_alloc(struct task_struct *task)
 	if (static_branch_unlikely(&ipi_mask_inlined))
 		return 0;
 
-	task->ipi_mask_ptr = kmalloc(cpumask_size(), GFP_KERNEL);
-	if (!task->ipi_mask_ptr)
+	ACCESS_PRIVATE(task, ipi_mask).ipi_mask_ptr =
+		kmalloc(cpumask_size(), GFP_KERNEL);
+	if (!ACCESS_PRIVATE(task, ipi_mask).ipi_mask_ptr)
 		return -ENOMEM;
 
 	return 0;
@@ -842,7 +843,7 @@ void smp_task_ipi_mask_free(struct task_struct *task)
 	if (static_branch_unlikely(&ipi_mask_inlined))
 		return;
 
-	kfree(task->ipi_mask_ptr);
+	kfree(ACCESS_PRIVATE(task, ipi_mask).ipi_mask_ptr);
 }
 
 static cpumask_t *smp_task_ipi_mask(struct task_struct *cur)
@@ -853,9 +854,9 @@ static cpumask_t *smp_task_ipi_mask(struct task_struct *cur)
 	 * avoid extra memory allocations.
 	 */
 	if (static_branch_unlikely(&ipi_mask_inlined))
-		return (cpumask_t *)&cur->ipi_mask_val;
+		return (cpumask_t *)&ACCESS_PRIVATE(cur, ipi_mask).ipi_mask_val;
 
-	return cur->ipi_mask_ptr;
+	return ACCESS_PRIVATE(cur, ipi_mask).ipi_mask_ptr;
 }
 #else
 static cpumask_t *smp_task_ipi_mask(struct task_struct *cur)
@@ -1133,12 +1134,14 @@ void __init smp_init(void)
  * @func:	The function to run on all applicable CPUs.
  *		This must be fast and non-blocking.
  * @info:	An arbitrary pointer to pass to both functions.
- * @wait:	If true, wait (atomically) until function has
- *		completed on other CPUs.
+ * @wait:	If true, wait until function has completed on other CPUs.
  * @mask:	The set of cpus to run on (only runs on online subset).
  *
- * Preemption is disabled to protect against CPUs going offline but not online.
- * CPUs going online during the call will not be seen or sent an IPI.
+ * Target CPU selection and work queueing are done with preemption
+ * disabled. This protects against CPUs going offline, but not against
+ * CPUs coming online concurrently; newly online CPUs are not guaranteed
+ * to be seen or sent an IPI. If @wait is true, the final wait for remote
+ * completion happens after that preemption-disabled section.
  *
  * You must not call this function with disabled interrupts or
  * from a hardware interrupt handler or from a bottom half handler.

@@ -27,6 +27,7 @@
 #define MOD_INFO_PACKET_H_
 
 #include "dm_services.h"
+#include "mod_info_packet_types.h"
 #include "mod_shared.h"
 //Forward Declarations
 struct dc_stream_state;
@@ -47,20 +48,11 @@ void mod_build_vsc_infopacket(const struct dc_stream_state *stream,
 		enum color_transfer_func tf);
 
 void mod_build_hf_vsif_infopacket(const struct dc_stream_state *stream,
-		struct dc_info_packet *info_packet);
+		struct dc_info_packet *info_packet, int ALLMEnabled, int ALLMValue);
 
 void mod_build_vtem_infopacket(const struct dc_stream_state *stream,
 		const struct mod_vrr_params *vrr,
 		struct dc_info_packet *infopacket);
-
-enum adaptive_sync_type {
-	ADAPTIVE_SYNC_TYPE_NONE             = 0,
-	ADAPTIVE_SYNC_TYPE_DP               = 1,
-	ADAPTIVE_SYNC_TYPE_PCON_ALLOWED     = 2,
-	ADAPTIVE_SYNC_TYPE_PCON_NOT_ALLOWED = 3,
-	ADAPTIVE_SYNC_TYPE_EDP              = 4,
-	ADAPTIVE_SYNC_TYPE_HDMI             = 5,
-};
 
 enum adaptive_sync_sdp_version {
 	AS_SDP_VER_0 = 0x0,

@@ -307,6 +307,15 @@ static void smi_remove(struct platform_device *pdev)
 	smi_devs_unregister(smi);
 }
 
+static const struct smi_node aw88399_hda = {
+	.instances = {
+		{ "aw88399-hda", IRQ_RESOURCE_AUTO, 0 },
+		{ "aw88399-hda", IRQ_RESOURCE_AUTO, 0 },
+		{}
+	},
+	.bus_type = SMI_AUTO_DETECT,
+};
+
 static const struct smi_node bsg1160_data = {
 	.instances = {
 		{ "bmc150_accel", IRQ_RESOURCE_GPIO, 0 },
@@ -409,15 +418,6 @@ static const struct smi_node max98390_hda = {
 		{}
 	},
 	.bus_type = SMI_I2C,
-};
-
-static const struct smi_node aw88399_hda = {
-	.instances = {
-		{ "aw88399-hda", IRQ_RESOURCE_AUTO, 0 },
-		{ "aw88399-hda", IRQ_RESOURCE_AUTO, 0 },
-		{}
-	},
-	.bus_type = SMI_AUTO_DETECT,
 };
 
 /*

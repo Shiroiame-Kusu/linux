@@ -1123,7 +1123,7 @@ static void flush_tlb_func(void *info)
 	VM_WARN_ON(!irqs_disabled());
 
 	if (!local) {
-		inc_irq_stat(irq_tlb_count);
+		inc_irq_stat(TLB);
 		count_vm_tlb_event(NR_TLB_REMOTE_FLUSH_RECEIVED);
 	}
 
@@ -1384,8 +1384,8 @@ static void init_flush_tlb_info(struct flush_tlb_info *info,
 	 * would be faster, do a full flush.
 	 */
 	if ((end - start) >> stride_shift > tlb_single_page_flush_ceiling) {
-		start = 0;
-		end = TLB_FLUSH_ALL;
+		start	= 0;
+		end	= TLB_FLUSH_ALL;
 	}
 
 	info->start		= start;
@@ -1410,8 +1410,7 @@ void flush_tlb_mm_range(struct mm_struct *mm, unsigned long start,
 	/* This is also a barrier that synchronizes with switch_mm(). */
 	new_tlb_gen = inc_mm_tlb_gen(mm);
 
-	init_flush_tlb_info(&info, mm, start, end, stride_shift, freed_tables,
-			    new_tlb_gen);
+	init_flush_tlb_info(&info, mm, start, end, stride_shift, freed_tables, new_tlb_gen);
 
 	/*
 	 * flush_tlb_multi() is not optimized for the common case in which only
@@ -1746,7 +1745,7 @@ bool nmi_uaccess_okay(void)
 }
 
 static ssize_t tlbflush_read_file(struct file *file, char __user *user_buf,
-			     size_t count, loff_t *ppos)
+				  size_t count, loff_t *ppos)
 {
 	char buf[32];
 	unsigned int len;
@@ -1755,20 +1754,15 @@ static ssize_t tlbflush_read_file(struct file *file, char __user *user_buf,
 	return simple_read_from_buffer(user_buf, count, ppos, buf, len);
 }
 
-static ssize_t tlbflush_write_file(struct file *file,
-		 const char __user *user_buf, size_t count, loff_t *ppos)
+static ssize_t tlbflush_write_file(struct file *file, const char __user *user_buf,
+				   size_t count, loff_t *ppos)
 {
-	char buf[32];
-	ssize_t len;
 	int ceiling;
+	int err;
 
-	len = min(count, sizeof(buf) - 1);
-	if (copy_from_user(buf, user_buf, len))
-		return -EFAULT;
-
-	buf[len] = '\0';
-	if (kstrtoint(buf, 0, &ceiling))
-		return -EINVAL;
+	err = kstrtoint_from_user(user_buf, count, 0, &ceiling);
+	if (err)
+		return err;
 
 	if (ceiling < 0)
 		return -EINVAL;

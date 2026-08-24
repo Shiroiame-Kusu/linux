@@ -52,6 +52,7 @@ static unsigned int __initdata tsc_early_khz;
 static DEFINE_STATIC_KEY_FALSE_RO(__use_tsc);
 
 int tsc_clocksource_reliable;
+int tsc_allow_direct_sync;
 
 static int __read_mostly tsc_force_recalibrate;
 
@@ -298,30 +299,17 @@ notrace u64 sched_clock(void)
 	preempt_enable_notrace();
 	return now;
 }
-
 int check_tsc_unstable(void)
 {
 	return tsc_unstable;
 }
 EXPORT_SYMBOL_GPL(check_tsc_unstable);
 
-#ifdef CONFIG_X86_TSC
 int __init notsc_setup(char *str)
 {
 	mark_tsc_unstable("boot parameter notsc");
 	return 1;
 }
-#else
-/*
- * disable flag for tsc. Takes effect by clearing the TSC cpu flag
- * in cpu/common.c
- */
-int __init notsc_setup(char *str)
-{
-	setup_clear_cpu_cap(X86_FEATURE_TSC);
-	return 1;
-}
-#endif
 __setup("notsc", notsc_setup);
 
 enum {
@@ -347,6 +335,8 @@ static int __init tsc_setup(char *str)
 		tsc_force_recalibrate = 1;
 	if (!strcmp(str, "watchdog"))
 		tsc_watchdog = TSC_WATCHDOG_ON;
+	if (!strcmp(str, "directsync"))
+		tsc_allow_direct_sync = 1;
 	return 1;
 }
 __setup("tsc=", tsc_setup);
