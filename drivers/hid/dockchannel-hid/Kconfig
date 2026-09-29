@@ -4,7 +4,6 @@ menu "DockChannel HID support"
 
 config HID_DOCKCHANNEL
 	tristate "HID over DockChannel transport layer for Apple Silicon SoCs"
-	default ARCH_APPLE
 	depends on APPLE_DOCKCHANNEL && INPUT && OF && HID
 	help
 	  Say Y here if you use an M2 or later Apple Silicon based laptop.

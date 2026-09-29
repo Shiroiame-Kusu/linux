@@ -237,13 +237,13 @@ struct dockchannel *dockchannel_init(struct platform_device *pdev)
 	init_completion(&dockchannel->rx_comp);
 
 	dockchannel->tx_irq = platform_get_irq_byname(pdev, "tx");
-	if (dockchannel->tx_irq <= 0) {
+	if (dockchannel->tx_irq < 0) {
 		return ERR_PTR(dev_err_probe(dev, dockchannel->tx_irq,
 				     "Failed to get TX IRQ"));
 	}
 
 	dockchannel->rx_irq = platform_get_irq_byname(pdev, "rx");
-	if (dockchannel->rx_irq <= 0) {
+	if (dockchannel->rx_irq < 0) {
 		return ERR_PTR(dev_err_probe(dev, dockchannel->rx_irq,
 				     "Failed to get RX IRQ"));
 	}
@@ -333,7 +333,6 @@ static int dockchannel_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct dockchannel_common *dcc;
-	struct device_node *child;
 
 	dcc = devm_kzalloc(dev, sizeof(*dcc), GFP_KERNEL);
 	if (!dcc)
@@ -355,14 +354,13 @@ static int dockchannel_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	dcc->irq = platform_get_irq(pdev, 0);
-	if (dcc->irq <= 0)
+	if (dcc->irq < 0)
 		return dev_err_probe(dev, dcc->irq, "Failed to get IRQ");
 
 	irq_set_handler_data(dcc->irq, dcc);
 	irq_set_chained_handler(dcc->irq, dockchannel_irq);
 
-	for_each_child_of_node(dev->of_node, child)
-		of_platform_device_create(child, NULL, dev);
+	devm_of_platform_populate(dev);
 
 	return 0;
 }

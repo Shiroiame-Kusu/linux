@@ -957,7 +957,7 @@ static void dchid_packet_work(struct work_struct *ws)
 	u8 *payload = work->data + sizeof(*shdr);
 
 	if (shdr->length + sizeof(*shdr) > work->hdr.length) {
-		dev_err(dchid->dev, "Bad sub header length (%d > %zu)\n",
+		dev_err(dchid->dev, "Bad sub header length (%hu > %zu)\n",
 			shdr->length, work->hdr.length - sizeof(*shdr));
 		return;
 	}
@@ -983,7 +983,7 @@ static void dchid_handle_ack(struct dchid_iface *iface, struct dchid_hdr *hdr, v
 	u8 *payload = data + sizeof(*shdr);
 
 	if (shdr->length + sizeof(*shdr) > hdr->length) {
-		dev_err(iface->dchid->dev, "Bad sub header length (%d > %ld)\n",
+		dev_err(iface->dchid->dev, "Bad sub header length (%hu > %zu)\n",
 			shdr->length, hdr->length - sizeof(*shdr));
 		return;
 	}
