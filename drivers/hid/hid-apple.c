@@ -54,10 +54,16 @@
 #define APPLE_MAGIC_REPORT_ID_POWER		3
 #define APPLE_MAGIC_REPORT_ID_BRIGHTNESS	1
 
+// DO NOT UPSTREAM:
+// temporary Fn key mode until xkeyboard-config has keyboard layouts with media
+// key mappings. At that point auto mode can drop function key mappings and this
+// mode can be dropped.
+#define FKEYS_IGNORE	5
+
 static unsigned int fnmode = 3;
 module_param(fnmode, uint, 0644);
 MODULE_PARM_DESC(fnmode, "Mode of fn key on Apple keyboards (0 = disabled, "
-		"1 = fkeyslast, 2 = fkeysfirst, [3] = auto, 4 = fkeysdisabled)");
+		"1 = fkeyslast, 2 = fkeysfirst, [3] = auto, 4 = fkeysdisabled, 5 = fkeysignore))");
 
 static int iso_layout = -1;
 module_param(iso_layout, int, 0644);
@@ -90,6 +96,9 @@ struct apple_sc_backlight {
 	struct led_classdev cdev;
 	struct hid_device *hdev;
 };
+
+/* T2 VHCI re-enumerates the internal keyboard across system resume. */
+static int apple_backlight_resume_brightness = -1;
 
 struct apple_backlight_config_report {
 	u8 report_id;
@@ -277,6 +286,16 @@ static const struct apple_key_translation apple_fn_keys[] = {
 	{ }
 };
 
+static const struct apple_key_translation apple_fn_keys_minimal[] = {
+	{ KEY_BACKSPACE, KEY_DELETE },
+	{ KEY_ENTER,	KEY_INSERT },
+	{ KEY_UP,	KEY_PAGEUP },
+	{ KEY_DOWN,	KEY_PAGEDOWN },
+	{ KEY_LEFT,	KEY_HOME },
+	{ KEY_RIGHT,	KEY_END },
+	{ }
+};
+
 static const struct apple_key_translation powerbook_fn_keys[] = {
 	{ KEY_BACKSPACE, KEY_DELETE },
 	{ KEY_F1,	KEY_BRIGHTNESSDOWN,     APPLE_FLAG_FKEY },
@@ -437,6 +456,8 @@ static int hidinput_apple_event(struct hid_device *hid, struct input_dev *input,
 			real_fnmode = 2;
 		else
 			real_fnmode = 1;
+	} else if (fnmode == FKEYS_IGNORE) {
+		real_fnmode = 2;
 	} else {
 		real_fnmode = fnmode;
 	}
@@ -477,6 +498,23 @@ static int hidinput_apple_event(struct hid_device *hid, struct input_dev *input,
 		asc->fn_on = !!value;
 
 	if (real_fnmode) {
+		switch (hid->bus) {
+		case BUS_HOST:
+		case BUS_SPI:
+			switch (hid->product) {
+			case SPI_DEVICE_ID_APPLE_MACBOOK_PRO13_2020:
+			case HOST_DEVICE_ID_APPLE_MACBOOK_PRO13_2022:
+				table = macbookpro_dedicated_esc_fn_keys;
+				break;
+			default:
+				if (fnmode == FKEYS_IGNORE)
+					table = apple_fn_keys_minimal;
+				else
+					table = magic_keyboard_2021_and_2024_fn_keys;
+				break;
+			}
+			break;
+		default:
 		switch (hid->product) {
 		case USB_DEVICE_ID_APPLE_ALU_WIRELESS_ANSI:
 		case USB_DEVICE_ID_APPLE_ALU_WIRELESS_ISO:
@@ -522,18 +560,9 @@ static int hidinput_apple_event(struct hid_device *hid, struct input_dev *input,
 				table = macbookair_fn_keys;
 			else if (hid->product < 0x21d || hid->product >= 0x300)
 				table = powerbook_fn_keys;
-			else if (hid->bus == BUS_HOST || hid->bus == BUS_SPI)
-				switch (hid->product) {
-				case SPI_DEVICE_ID_APPLE_MACBOOK_PRO13_2020:
-				case HOST_DEVICE_ID_APPLE_MACBOOK_PRO13_2022:
-					table = macbookpro_dedicated_esc_fn_keys;
-					break;
-				default:
-					table = magic_keyboard_2021_and_2024_fn_keys;
-					break;
-				}
 			else
 				table = apple_fn_keys;
+		}
 		}
 
 		trans = apple_find_translation(table, code);
@@ -718,6 +747,7 @@ static void apple_setup_input(struct input_dev *input)
 
 	/* Enable all needed keys */
 	apple_setup_key_translation(input, apple_fn_keys);
+	apple_setup_key_translation(input, apple_fn_keys_minimal);
 	apple_setup_key_translation(input, powerbook_fn_keys);
 	apple_setup_key_translation(input, powerbook_numlock_keys);
 	apple_setup_key_translation(input, apple_iso_keyboard);
@@ -835,6 +865,7 @@ static int apple_backlight_led_set(struct led_classdev *led_cdev,
 static int apple_backlight_init(struct hid_device *hdev)
 {
 	int ret;
+	int brightness;
 	struct apple_sc *asc = hid_get_drvdata(hdev);
 	struct apple_backlight_config_report *rep;
 
@@ -870,13 +901,20 @@ static int apple_backlight_init(struct hid_device *hdev)
 	asc->backlight->cdev.name = "apple::kbd_backlight";
 	asc->backlight->cdev.max_brightness = rep->backlight_on_max;
 	asc->backlight->cdev.brightness_set_blocking = apple_backlight_led_set;
-	asc->backlight->cdev.flags = LED_CORE_SUSPENDRESUME;
+	/* VHCI re-enumeration restores the cached brightness in the next probe. */
 
-	ret = apple_backlight_set(hdev, 0, 0);
+	brightness = READ_ONCE(apple_backlight_resume_brightness);
+	if (brightness < 0)
+		brightness = LED_OFF;
+	else
+		brightness = min_t(int, brightness, rep->backlight_on_max);
+
+	ret = apple_backlight_set(hdev, brightness, 0);
 	if (ret < 0) {
 		hid_err(hdev, "backlight set request failed: %d\n", ret);
 		goto cleanup_and_exit;
 	}
+	asc->backlight->cdev.brightness = brightness;
 
 	ret = devm_led_classdev_register(&hdev->dev, &asc->backlight->cdev);
 
@@ -961,6 +999,11 @@ static int apple_probe(struct hid_device *hdev,
 	if (quirks & APPLE_IGNORE_MOUSE && hdev->type == HID_TYPE_USBMOUSE)
 		return -ENODEV;
 
+	// key remapping will happen in xkeyboard-config so ignore
+	// APPLE_ISO_TILDE_QUIRK
+	if ((id->bus == BUS_SPI || id->bus == BUS_HOST) && fnmode == FKEYS_IGNORE)
+		quirks &= ~APPLE_ISO_TILDE_QUIRK;
+
 	asc = devm_kzalloc(&hdev->dev, sizeof(*asc), GFP_KERNEL);
 	if (asc == NULL) {
 		hid_err(hdev, "can't alloc apple descriptor\n");
@@ -1016,6 +1059,9 @@ static void apple_remove(struct hid_device *hdev)
 
 	if (asc->quirks & APPLE_RDESC_BATTERY)
 		timer_delete_sync(&asc->battery_timer);
+	if (asc->backlight)
+		WRITE_ONCE(apple_backlight_resume_brightness,
+			   asc->backlight->cdev.brightness);
 
 	hid_hw_stop(hdev);
 }
@@ -1219,6 +1265,8 @@ static const struct hid_device_id apple_devices[] = {
 		.driver_data = APPLE_NUMLOCK_EMULATION | APPLE_HAS_FN },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_GEYSER1_TP_ONLY),
 		.driver_data = APPLE_NUMLOCK_EMULATION | APPLE_HAS_FN },
+	{ HID_SPI_DEVICE(SPI_VENDOR_ID_APPLE, HID_ANY_ID),
+		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },  // TODO: remove APPLE_ISO_TILDE_QUIRK
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_2021),
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_RDESC_BATTERY },
 	{ HID_BLUETOOTH_DEVICE(BT_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_2021),
@@ -1231,6 +1279,8 @@ static const struct hid_device_id apple_devices[] = {
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_RDESC_BATTERY },
 	{ HID_BLUETOOTH_DEVICE(BT_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_NUMPAD_2021),
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },
+	{ HID_DEVICE(BUS_HOST, HID_GROUP_ANY, HOST_VENDOR_ID_APPLE, HID_ANY_ID),
+		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },  // TODO: remove APPLE_ISO_TILDE_QUIRK
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_2024),
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_RDESC_BATTERY },
 	{ HID_BLUETOOTH_DEVICE(BT_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_2024),
@@ -1242,10 +1292,6 @@ static const struct hid_device_id apple_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_NUMPAD_2024),
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK | APPLE_RDESC_BATTERY },
 	{ HID_BLUETOOTH_DEVICE(BT_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_MAGIC_KEYBOARD_NUMPAD_2024),
-		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },
-	{ HID_SPI_DEVICE(SPI_VENDOR_ID_APPLE, HID_ANY_ID),
-		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },
-	{ HID_DEVICE(BUS_HOST, HID_GROUP_ANY, HOST_VENDOR_ID_APPLE, HID_ANY_ID),
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_TILDE_QUIRK },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_TOUCHBAR_BACKLIGHT),
 		.driver_data = APPLE_MAGIC_BACKLIGHT },

@@ -4,8 +4,8 @@ menu "SPI HID support"
 
 config SPI_HID_APPLE_OF
 	tristate "HID over SPI transport layer for Apple Silicon SoCs"
-	default ARCH_APPLE
-	depends on SPI && INPUT && OF
+	depends on INPUT && OF
+	select SPI_HID_APPLE_CORE
 	help
 	  Say Y here if you use Apple Silicon based laptop. The keyboard and
 	  touchpad are HID based devices connected via SPI.
@@ -20,7 +20,5 @@ endmenu
 
 config SPI_HID_APPLE_CORE
 	tristate
-	default y if SPI_HID_APPLE_OF=y
-	default m if SPI_HID_APPLE_OF=m
 	select HID
 	select CRC16
