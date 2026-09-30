@@ -140,6 +140,56 @@ DECLARE_BITMAP(cpu_sched_prio_bitmap, SCHED_LEVELS)		____cacheline_aligned_in_sm
 
 #define sched_idle_mask	(cpu_sched_prio_mask + SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO)
 
+/*
+ * cpu_sched_prio_bitmap has a bit per populated cpu_sched_prio_mask[] level,
+ * and wakeup placement only visits levels whose bit is set. Each CPU updates
+ * masks and bits under nothing but its own rq->lock, so a level one CPU
+ * empties while another joins it must not end up with its bit clear: the
+ * joiner would be invisible to placement until some other CPU happened to
+ * enter the level. Clearing the bit after a plain emptiness check allowed
+ * exactly that. Both sides now store, then load the other side's word, with a
+ * full barrier in between (store-buffering shape), so at least one of them
+ * observes the other:
+ *
+ *   join:  set mask bit;   mb; set level bit if it reads clear
+ *   leave: clear mask bit; if the mask reads empty: clear level bit;
+ *          mb; set it again if the mask refilled meanwhile
+ *
+ * A level can still transiently read populated while empty -- scanners find
+ * no CPU there and move on -- but not the other way round. Reading before
+ * setting also keeps a locked RMW off this shared line whenever the bit is
+ * already set, which on a busy system is nearly always.
+ */
+static __always_inline void sched_prio_level_publish(const int idx)
+{
+	smp_mb__after_atomic();
+	if (!test_bit(idx, cpu_sched_prio_bitmap))
+		set_bit(idx, cpu_sched_prio_bitmap);
+}
+
+static __always_inline void sched_prio_level_retire(const int idx)
+{
+	if (!cpumask_empty(cpu_sched_prio_mask + idx))
+		return;
+
+	clear_bit(idx, cpu_sched_prio_bitmap);
+	smp_mb__after_atomic();
+	if (!cpumask_empty(cpu_sched_prio_mask + idx))
+		set_bit(idx, cpu_sched_prio_bitmap);
+}
+
+static __always_inline void sched_prio_level_join(const int cpu, const int idx)
+{
+	cpumask_set_cpu(cpu, cpu_sched_prio_mask + idx);
+	sched_prio_level_publish(idx);
+}
+
+static __always_inline void sched_prio_level_leave(const int cpu, const int idx)
+{
+	cpumask_clear_cpu(cpu, cpu_sched_prio_mask + idx);
+	sched_prio_level_retire(idx);
+}
+
 #include "alt_topology.c"
 
 static __always_inline void update_sched_cpu_prio(const int cpu, const int prio)
@@ -151,22 +201,15 @@ static __always_inline void update_sched_cpu_prio(const int cpu, const int prio)
 
 	WRITE_ONCE(cpu_prio(cpu), prio);
 
-	if (IDLE_TASK_SCHED_PRIO == last_prio) {
+	if (IDLE_TASK_SCHED_PRIO == last_prio)
 		sched_clear_idle_mask(cpu);
-	} else {
-		int idx = SCHED_LEVELS - 1 - last_prio;
-		cpumask_clear_cpu(cpu, cpu_sched_prio_mask + idx);
-		if (cpumask_empty(cpu_sched_prio_mask + idx))
-			clear_bit(idx, cpu_sched_prio_bitmap);
-	}
+	else
+		sched_prio_level_leave(cpu, SCHED_LEVELS - 1 - last_prio);
 
-	if (IDLE_TASK_SCHED_PRIO == prio) {
+	if (IDLE_TASK_SCHED_PRIO == prio)
 		sched_set_idle_mask(cpu);
-	} else {
-		int idx = SCHED_LEVELS - 1 - prio;
-		cpumask_set_cpu(cpu, cpu_sched_prio_mask + idx);
-		set_bit(idx, cpu_sched_prio_bitmap);
-	}
+	else
+		sched_prio_level_join(cpu, SCHED_LEVELS - 1 - prio);
 }
 
 /* task function */
