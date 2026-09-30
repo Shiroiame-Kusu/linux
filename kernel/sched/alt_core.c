@@ -1537,12 +1537,42 @@ static __always_inline void update_queued_task_tick_dependency(int cpu)
 		sched_update_tick_dependency(cpu_rq(cpu));
 }
 
+/*
+ * The grq side of the idle-entry handshake with pick_next_task(): a CPU
+ * going idle publishes its idle level and then looks at the grq; whoever
+ * enqueues into the grq must look at the levels afterwards, with a full
+ * barrier in between on both sides. Then at least one side sees the other
+ * -- the idle CPU finds the task, or the enqueuer finds the idle CPU -- and
+ * a task cannot sit in the grq next to a CPU that went idle concurrently.
+ *
+ * notify_queued_task() is that look for wakeups. finish_task() and
+ * migrate_preempt_task() search for a target before they enqueue, so when
+ * that search found nothing they come here after the enqueue: an idle CPU
+ * that appeared in between is kicked. Runs with IRQs off, so @p, even if it
+ * is picked and exits meanwhile, is not freed underneath (RCU).
+ */
+static __always_inline void kick_idle_for_queued(struct task_struct *p, const int skip)
+{
+	int cpu;
+
+	smp_mb__after_atomic();
+	for_each_cpu_and(cpu, p->cpus_ptr, sched_idle_mask) {
+		if (cpu != skip && is_cpu_allowed(p, cpu)) {
+			kick_preempt_cpu(cpu);
+			return;
+		}
+	}
+}
+
 static __always_inline void notify_queued_task(struct task_struct *p)
 {
 	struct rq *rq;
 	int kick_cpu;
 
 	lockdep_assert_held(&p->pi_lock);
+
+	/* Order the grq enqueue before the level scan; see kick_idle_for_queued(). */
+	smp_mb__after_atomic();
 
 	rq = wakeup_rq_trylock(p, &kick_cpu);
 	if (rq) {
@@ -3887,6 +3917,8 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 			} else {
 				if (kick_cpu < nr_cpu_ids)
 					kick_preempt_cpu(kick_cpu);
+				else
+					kick_idle_for_queued(prev, cpu);
 				update_queued_task_tick_dependency(tick_cpu);
 			}
 		}
@@ -5079,6 +5111,8 @@ static __always_inline void migrate_preempt_task(struct task_struct *p, const in
 	} else {
 		if (kick_cpu < nr_cpu_ids)
 			kick_preempt_cpu(kick_cpu);
+		else
+			kick_idle_for_queued(p, cpu);
 		update_queued_task_tick_dependency(tick_cpu);
 	}
 }
@@ -5364,6 +5398,20 @@ repick:
 	next = blocked ? idle : rq->curr;
 	if (next == idle) {
 		if (rq->online) {
+			/*
+			 * Publish the idle level before the last look at the grq
+			 * -- this CPU's half of the handshake described at
+			 * kick_idle_for_queued(). Looking first and publishing
+			 * afterwards, from __schedule(), let a concurrent
+			 * enqueuer's post-enqueue scan miss this CPU while this
+			 * check missed the task: the task stayed queued next to
+			 * an idle CPU until some other CPU happened to schedule.
+			 * If a task is re-picked below, __schedule() moves the
+			 * level on again.
+			 */
+			update_sched_cpu_prio(cpu, IDLE_TASK_SCHED_PRIO);
+			smp_mb__after_atomic();
+
 			if (srq_nr_queued(cpu)) {
 				int sidx = wakeup_srq_task(cpu);
 
