@@ -2998,13 +2998,22 @@ bool cpus_equal_capacity(int this_cpu, int that_cpu)
 
 static inline void ttwu_queue(struct task_struct *p, int wake_flags)
 {
-	int cpu = task_cpu(p);
+	/*
+	 * Choosing a wakelist CPU costs is_cpu_allowed() and possibly a walk
+	 * of p->cpus_ptr, which the compiler may not drop even though the
+	 * wakelist itself is compiled out: test_bit() is volatile asm. So
+	 * only choose one when the wakelist exists (see the BUILD_BUG_ON()
+	 * in try_to_wake_up() before enabling it).
+	 */
+	if (__is_defined(ALT_SCHED_TTWU_QUEUE)) {
+		int cpu = task_cpu(p);
 
-	if (!is_cpu_allowed(p, cpu))
-		cpu = queued_task_tick_cpu(p);
+		if (!is_cpu_allowed(p, cpu))
+			cpu = queued_task_tick_cpu(p);
 
-	if (cpu < nr_cpu_ids && ttwu_queue_wakelist(p, cpu, wake_flags))
-		return;
+		if (cpu < nr_cpu_ids && ttwu_queue_wakelist(p, cpu, wake_flags))
+			return;
+	}
 
 	ttwu_do_activate(p, wake_flags);
 }
