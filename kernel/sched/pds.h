@@ -133,6 +133,7 @@ static inline void do_sched_yield_type_1(struct task_struct *p, struct rq *rq)
 	sched_task_renew(p, rq);
 }
 
+static inline void sched_task_sleep(struct task_struct *p, const struct rq *rq) {}
 static inline void sched_task_ttwu(struct task_struct *p) {}
 static inline void sched_task_deactivate(struct task_struct *p, struct rq *rq) {}
 
