@@ -28,6 +28,7 @@
 #include <linux/context_tracking.h>
 #include <linux/completion.h>
 #include <linux/cpuset.h>
+#include <linux/debugfs.h>
 #include <linux/delayacct.h>
 #include <linux/init_task.h>
 #include <linux/kcov.h>
@@ -4749,49 +4750,60 @@ static inline void schedule_debug(struct task_struct *prev, bool preempt)
 }
 
 #ifdef ALT_SCHED_DEBUG
-static inline void alt_sched_rq_debug(struct rq *rq)
-{
-	const int cpu = cpu_of(rq);
-
-	printk(KERN_INFO "sched: rq(%02d) nr_pinned=%d, prio=%d\n",
-	       cpu, rq->nr_pinned, READ_ONCE(cpu_prio(cpu)));
-}
-
 /*
- * %p, not %px: alt_sched_debug() is reachable from sched_rr_get_interval(2)
- * by any user, and an unhashed task_struct address there is a straight
- * kernel-heap disclosure. The hash is stable within a boot, so pointers
- * remain correlatable across these lines for debugging.
+ * Scheduler state dump, root-only at /sys/kernel/debug/sched/alt_state.
+ *
+ * This used to be printk'd from sched_rr_get_interval(2): any user could put
+ * ~30 lines into the kernel log per call and take a grq bucket lock with IRQs
+ * off while doing it. debugfs keeps it root-only and out of the log.
  */
-static inline void alt_sched_task_debug(struct task_struct *p)
+static void alt_sched_levels_show(struct seq_file *m)
 {
-	printk(KERN_INFO "sched: task %p, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
-	       p, task_sched_prio(p), p->cpus_ptr->bits[0], task_cpu(p));
+	int i;
+
+	/*
+	 * Lockless snapshot, so a level can be caught mid-update. A level whose
+	 * bitmap bit disagrees with its mask for good, though, is exactly what
+	 * wakeup placement cannot see, so flag it.
+	 */
+	for (i = 0; i < SCHED_LEVELS; i++) {
+		const struct cpumask *mask = cpu_sched_prio_mask + i;
+		bool bit = test_bit(i, cpu_sched_prio_bitmap);
+		bool populated = !cpumask_empty(mask);
+
+		if (!bit && !populated)
+			continue;
+
+		seq_printf(m, "level %2d (sched_prio %2d): %*pbl%s\n",
+			   i, SCHED_LEVELS - 1 - i, cpumask_pr_args(mask),
+			   bit == populated ? "" :
+			   bit ? "  [bit set, mask empty]" : "  [MASK POPULATED, BIT CLEAR]");
+	}
 }
 
-static void alt_sched_srq_debug(struct sched_run_queue *srq)
+static void alt_sched_srq_show(struct seq_file *m, struct sched_run_queue *srq)
 {
 	int idx = find_first_bit(srq->bitmap, SCHED_QUEUE_BITS);
 
-	printk(KERN_INFO "sched: srq debug, srq_nr_queued:%d, bitmap:0x%016lx, firstbit:%d\n",
-	       srq_nr_queued(0), srq->bitmap[0], idx);
+	seq_printf(m, "grq: nr_queued %d, bitmap 0x%016lx, first bucket %d\n",
+		   srq_nr_queued(0), srq->bitmap[0], idx);
 
 	if (SCHED_QUEUE_BITS != idx) {
 		struct task_struct *oldest = NULL;
+		char comm[TASK_COMM_LEN];
 		unsigned long cpus = 0, flags;
-		int sched_prio = 0, on_cpu = 0;
+		int sched_prio = 0, cpu = 0;
+		pid_t pid = 0;
 
 		/*
 		 * The bucket's oldest task is the head of the consumer FIFO once
 		 * drained, otherwise the tail of the still-undrained producer
 		 * stack. Locking is needed -- an unlocked list_empty() /
 		 * list_first_entry() pair could hand back the list head cast to a
-		 * task_struct -- but this runs from the sched_rr_get_interval()
-		 * syscall, so it must not be the one acquirer of _lock[idx] that
-		 * leaves IRQs enabled, and it must not hold the bucket every CPU's
-		 * pick_next_task() needs across a printk(). Snapshot, then print:
-		 * @oldest may be picked, run and freed once the lock is dropped,
-		 * so nothing below dereferences it.
+		 * task_struct -- and every pick_next_task() may need this lock,
+		 * so snapshot under it and format afterwards: once the lock is
+		 * dropped @oldest may be picked, run and freed, so nothing below
+		 * dereferences it.
 		 */
 		raw_spin_lock_irqsave(&srq->_lock[idx], flags);
 
@@ -4802,9 +4814,8 @@ static void alt_sched_srq_debug(struct sched_run_queue *srq)
 			struct llist_node *entry = srq->_head[idx].first;
 
 			if (entry) {
-				while (entry->next) {
+				while (entry->next)
 					entry = entry->next;
-				}
 				oldest = llist_entry(entry, struct task_struct, pq_node);
 			}
 		}
@@ -4812,48 +4823,52 @@ static void alt_sched_srq_debug(struct sched_run_queue *srq)
 		if (oldest) {
 			sched_prio = task_sched_prio(oldest);
 			cpus = oldest->cpus_ptr->bits[0];
-			on_cpu = task_cpu(oldest);
+			cpu = task_cpu(oldest);
+			pid = task_pid_nr(oldest);
+			get_task_comm(comm, oldest);
 		}
 
 		raw_spin_unlock_irqrestore(&srq->_lock[idx], flags);
 
-		/* %p rather than %px: see alt_sched_task_debug(). */
 		if (oldest)
-			printk(KERN_INFO "sched: task %p, sched_prio: %d, cpumask: 0x%04lx, cpu: %d\n",
-			       oldest, sched_prio, cpus, on_cpu);
+			seq_printf(m, "  oldest queued: %s/%d sched_prio %d cpus[0] 0x%016lx last cpu %d\n",
+				   comm, pid, sched_prio, cpus, cpu);
 	}
 }
 
-static void alt_sched_cpu_prio_debug(void)
-{
-	int i;
-
-	printk(KERN_INFO "sched: cpu_prio[idle] : 0x%08lx\n", cpu_sched_prio_mask[6].bits[0]);
-
-	for_each_set_bit (i, cpu_sched_prio_bitmap, SCHED_LEVELS) {
-		printk(KERN_INFO "sched: cpu_prio[%4d] : 0x%08lx\n",
-		       SCHED_LEVELS - 1 - i,
-		       cpu_sched_prio_mask[i].bits[0]);
-	}
-}
-
-void alt_sched_debug(void)
+static int alt_sched_state_show(struct seq_file *m, void *v)
 {
 	int cpu;
 
-	alt_sched_cpu_prio_debug();
+	seq_printf(m, "sched/alt: %s %s\n", ALT_SCHED_NAME, ALT_SCHED_VERSION);
 
-	alt_sched_srq_debug(&grq);
+	alt_sched_levels_show(m);
+	alt_sched_srq_show(m, &grq);
 
 	for_each_cpu(cpu, cpu_active_mask)
-		alt_sched_rq_debug(cpu_rq(cpu));
+		seq_printf(m, "cpu%-3d prio %2d nr_pinned %u preempt_list %s\n",
+			   cpu, READ_ONCE(cpu_prio(cpu)), cpu_rq(cpu)->nr_pinned,
+			   is_preempt_list_empty(cpu) ? "empty" : "queued");
 
-/*
-	for (int i = 0; i < 8; i++)
-		printk(KERN_INFO "sched: [%d] = %d\n", i, alt_debug[i]);
-*/
+	return 0;
 }
-#endif
+DEFINE_SHOW_ATTRIBUTE(alt_sched_state);
+
+/* After sched_init_debug(), a plain late_initcall, has created sched/. */
+static int __init alt_sched_debugfs_init(void)
+{
+	struct dentry *dir = debugfs_lookup("sched", NULL);
+
+	if (IS_ERR_OR_NULL(dir))
+		return 0;
+
+	debugfs_create_file("alt_state", 0400, dir, NULL, &alt_sched_state_fops);
+	dput(dir);
+
+	return 0;
+}
+late_initcall_sync(alt_sched_debugfs_init);
+#endif /* ALT_SCHED_DEBUG */
 
 /*
  * Timeslices below RESCHED_NS are considered as good as expired as there's no

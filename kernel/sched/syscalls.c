@@ -1668,8 +1668,6 @@ static int sched_rr_get_interval(pid_t pid, struct timespec64 *t)
 #else
 	}
 
-	alt_sched_debug();
-
 	*t = ns_to_timespec64(sysctl_sched_base_slice);
 #endif /* !CONFIG_SCHED_ALT */
 	return 0;

@@ -2,16 +2,10 @@
 #define _KERNEL_SCHED_ALT_CORE_H
 
 /*
- * Compile time debug macro
- * #define ALT_SCHED_DEBUG
+ * Compile time debug macro: boot-time topology prints and the root-only
+ * /sys/kernel/debug/sched/alt_state dump. Comment out to drop both.
  */
 #define ALT_SCHED_DEBUG
-
-#ifdef ALT_SCHED_DEBUG
-extern void alt_sched_debug(void);
-#else
-static inline void alt_sched_debug(void) {}
-#endif
 
 /*
  * Task related inlined functions
