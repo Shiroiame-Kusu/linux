@@ -2073,22 +2073,10 @@ static inline struct rq *wakeup_rq_trylock(struct task_struct *p, int *kick_cpu)
 	return __wakeup_rq_trylock(p, sched_prio, p->cpus_ptr, -1, kick_cpu);
 }
 
-static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct rq *rq)
+/* Queue @p, on no list at the moment, on @rq's preempt_list; holds rq->lock. */
+static __always_inline void preempt_list_add_locked(struct task_struct *p, struct rq *rq)
 {
 	int cpu = cpu_of(rq);
-
-	if (task_on_rq_preempt(p)) {
-		int wake_cpu = READ_ONCE(p->wake_cpu);
-
-		WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
-		if (WARN_ON_ONCE(wake_cpu >= nr_cpu_ids))
-			return;
-		if (wake_cpu == cpu)
-			resched_curr(rq);
-		else
-			kick_preempt_cpu(wake_cpu);
-		return;
-	}
 
 	WRITE_ONCE(p->wake_cpu, cpu);
 	WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
@@ -2114,6 +2102,45 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
 	if (rq->curr == rq->idle ||
 	    task_sched_prio(p) < READ_ONCE(cpu_prio(cpu)))
 		resched_curr(rq);
+}
+
+static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct rq *rq)
+{
+	int cpu = cpu_of(rq);
+
+	if (task_on_rq_preempt(p)) {
+		int wake_cpu = READ_ONCE(p->wake_cpu);
+
+		WARN_ON_ONCE(READ_ONCE(p->__sched_prio) != -1);
+		if (WARN_ON_ONCE(wake_cpu >= nr_cpu_ids))
+			return;
+		if (wake_cpu == cpu)
+			resched_curr(rq);
+		else
+			kick_preempt_cpu(wake_cpu);
+		return;
+	}
+
+	preempt_list_add_locked(p, rq);
+}
+
+/*
+ * finish_task() and migrate_preempt_task() re-place a task that runs nowhere.
+ * When their scan locked a target, the task is handed to it directly through
+ * its preempt_list instead of being enqueued in the grq with the target merely
+ * rescheduled: through the grq any CPU can take it first -- for an active
+ * balance, typically the very E-core the stopper just preempted it on, which
+ * re-picks it microseconds before the idle P-core it was meant for has left
+ * its idle state. The handoff is made only while the target, re-checked under
+ * its lock, will run the task promptly: allowed for it (a dead CPU stays at
+ * the idle level), and idle or running something the task outranks.
+ */
+static __always_inline bool preempt_handoff_ok(struct task_struct *p, struct rq *rq)
+{
+	const int cpu = cpu_of(rq);
+
+	return is_cpu_allowed(p, cpu) &&
+	       (rq->curr == rq->idle || task_sched_prio(p) < READ_ONCE(cpu_prio(cpu)));
 }
 
 static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
@@ -3934,15 +3961,20 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 			 */
 			trq = __wakeup_rq_trylock(prev, task_sched_prio(prev),
 						  prev->cpus_ptr, cpu, &kick_cpu);
-			tick_cpu = (trq || kick_cpu < nr_cpu_ids) ?
-				nr_cpu_ids : queued_task_tick_dependency_cpu(prev);
-
-			SRQ_ENQUEUE_TASK(srq, prev, );
+			if (trq && !preempt_handoff_ok(prev, trq)) {
+				raw_spin_unlock(&trq->lock);
+				trq = NULL;
+			}
 
 			if (trq) {
-				resched_curr(trq);
+				preempt_list_add_locked(prev, trq);
 				raw_spin_unlock(&trq->lock);
 			} else {
+				tick_cpu = (kick_cpu < nr_cpu_ids) ?
+					nr_cpu_ids : queued_task_tick_dependency_cpu(prev);
+
+				SRQ_ENQUEUE_TASK(srq, prev, );
+
 				if (kick_cpu < nr_cpu_ids)
 					kick_preempt_cpu(kick_cpu);
 				else
@@ -5178,20 +5210,26 @@ static __always_inline void migrate_preempt_task(struct task_struct *p, const in
 
 	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr,
 					    cpu, &kick_cpu);
-	tick_cpu = (rq || kick_cpu < nr_cpu_ids) ?
+	if (rq && !preempt_handoff_ok(p, rq)) {
+		raw_spin_unlock(&rq->lock);
+		rq = NULL;
+	}
+
+	if (rq) {
+		preempt_list_add_locked(p, rq);
+		raw_spin_unlock(&rq->lock);
+		return;
+	}
+
+	tick_cpu = (kick_cpu < nr_cpu_ids) ?
 		nr_cpu_ids : queued_task_tick_dependency_cpu(p);
 
 	activate_task(p, cpu_srq(cpu));
-	if (rq) {
-		resched_curr(rq);
-		raw_spin_unlock(&rq->lock);
-	} else {
-		if (kick_cpu < nr_cpu_ids)
-			kick_preempt_cpu(kick_cpu);
-		else
-			kick_idle_for_queued(p, cpu);
-		update_queued_task_tick_dependency(tick_cpu);
-	}
+	if (kick_cpu < nr_cpu_ids)
+		kick_preempt_cpu(kick_cpu);
+	else
+		kick_idle_for_queued(p, cpu);
+	update_queued_task_tick_dependency(tick_cpu);
 }
 
 static __always_inline struct task_struct *pick_preempt_task(const int cpu, int pick_sched_prio)
