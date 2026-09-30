@@ -5187,12 +5187,24 @@ static __always_inline void migrate_preempt_task(struct task_struct *p, const in
 
 static __always_inline struct task_struct *pick_preempt_task(const int cpu, int pick_sched_prio)
 {
+	struct llist_head *head = this_cpu_ptr(&preempt_list);
 	struct llist_node *plist;
 	struct task_struct *p, *n, *preempt = NULL;
 
-	plist = llist_del_all(this_cpu_ptr(&preempt_list));
+	/*
+	 * Called on every __schedule(), and the list is nearly always empty:
+	 * look before the xchg. Remote wakers write this line, so the
+	 * unconditional RMW had to fetch it exclusive on every pass. An add
+	 * that lands just after the look is no different from one landing
+	 * just after the xchg -- it waits for this CPU's next pick, which its
+	 * adder triggers when it has to.
+	 */
+	if (llist_empty(head))
+		return NULL;
+
+	plist = llist_del_all(head);
 	if (NULL == plist)
-		return preempt;
+		return NULL;
 
 	plist = llist_reverse_order(plist);
 	llist_for_each_entry_safe(p, n, plist, pq_node) {
