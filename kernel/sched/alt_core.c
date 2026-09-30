@@ -4562,10 +4562,13 @@ void sched_tick(void)
 
 	/*
 	 * Backstop: a task on this CPU's preempt_list relies on the CPU
-	 * re-entering __schedule(). A non-empty preempt_list keeps idle_rq()
-	 * false so the CPU cannot NOHZ-stop its tick, so a local per-tick
-	 * check suffices: if idle with a non-empty list and no resched
-	 * pending, force one. O(1), local cacheline only.
+	 * re-entering __schedule(). Whoever queues there kicks this CPU
+	 * (resched_curr() under its lock, or kick_preempt_cpu()), and that
+	 * kick is what has to be reliable: the NOHZ idle code never consults
+	 * idle_rq(), so an idle CPU stops its tick with a non-empty list all
+	 * the same, and this check only covers CPUs still ticking. If idle
+	 * with a non-empty list and no resched pending, force one. O(1),
+	 * local cacheline only.
 	 */
 	if (rq->curr == rq->idle && !is_preempt_list_empty(cpu) &&
 	    !test_tsk_need_resched(rq->idle))
@@ -5025,17 +5028,45 @@ static __always_inline void requeue_preempt_task(struct task_struct *p, const in
 	llist_add(&p->pq_node, per_cpu_ptr(&preempt_list, cpu));
 }
 
+/*
+ * Runs in hardirq context on the kicked CPU, where current cannot change
+ * underneath, so marking it needs no rq->lock -- precisely the lock the sender
+ * could not take.
+ */
+static void kick_irq_work_fn(struct irq_work *work)
+{
+	set_tsk_need_resched(current);
+	set_preempt_need_resched();
+}
+
+static DEFINE_PER_CPU(struct irq_work, kick_irq_work) = IRQ_WORK_INIT_HARD(kick_irq_work_fn);
+
 static __always_inline void kick_preempt_cpu(const int cpu)
 {
 	struct rq *rq = cpu_rq(cpu);
+	unsigned long flags;
 
 	sched_update_tick_dependency(rq);
-	if (likely(raw_spin_trylock(&rq->lock))) {
+	/*
+	 * irqsave: affine_move_task() kicks with IRQs enabled, and an
+	 * interrupt here that wakes a task pinned to @cpu takes this very lock
+	 * unconditionally (wakeup_rq_trylock()) -- a self-deadlock.
+	 */
+	if (likely(raw_spin_trylock_irqsave(&rq->lock, flags))) {
 		if (cpu_online(cpu) || cpu == smp_processor_id())
 			resched_curr(rq);
-		raw_spin_unlock(&rq->lock);
-	} else {
-		wake_up_nohz_cpu(cpu);
+		raw_spin_unlock_irqrestore(&rq->lock, flags);
+	} else if (cpu_online(cpu)) {
+		/*
+		 * The holder may be @cpu itself in __schedule(), or anybody
+		 * placing work there. wake_up_nohz_cpu(), the old fallback,
+		 * only marks @cpu's idle task, so a busy @cpu was never
+		 * interrupted and the task this kick was for waited for its
+		 * next natural reschedule -- a slice, or for as long as a
+		 * shielding task ran. Mark whatever runs there when the kick
+		 * lands; a kick already in flight to @cpu covers this one.
+		 */
+		irq_work_queue_on(per_cpu_ptr(&kick_irq_work, cpu), cpu);
 	}
 }
 
