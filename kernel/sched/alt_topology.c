@@ -66,8 +66,7 @@ static __always_inline void sched_set_idle_mask(const unsigned int cpu)
 	case CPU_TOPOLOGY_PCORE:
 	case CPU_TOPOLOGY_ECORE:
 		topo--;
-		cpumask_set_cpu(cpu, cpu_sched_prio_mask + topo);
-		set_bit(topo, cpu_sched_prio_bitmap);
+		sched_prio_level_join(cpu, topo);
 		break;
 #ifdef CONFIG_SCHED_SMT
 	case CPU_TOPOLOGY_UCORE_SMT:
@@ -78,9 +77,11 @@ static __always_inline void sched_set_idle_mask(const unsigned int cpu)
 		 * idle transitions under only their own rq->lock. Whole-mask
 		 * cpumask_or()/cpumask_andnot() are plain read-modify-writes
 		 * and lose remote cores' bits; only per-bit atomics are safe
-		 * here. The group-idle classification itself may still go
-		 * momentarily stale (it is advisory and self-heals on the
-		 * next transition), but bits of unrelated cores must not.
+		 * here, with the level bits kept by the publish/retire
+		 * protocol (see sched_prio_level_publish()). The group-idle
+		 * classification itself may still go momentarily stale (it is
+		 * advisory and self-heals on the next transition), but bits
+		 * of unrelated cores must not.
 		 */
 		const struct cpumask *smt_mask = cpu_smt_mask(cpu);
 		int i;
@@ -89,25 +90,22 @@ static __always_inline void sched_set_idle_mask(const unsigned int cpu)
 		if (cpumask_intersects(smt_mask, sched_idle_mask)) {
 			for_each_cpu(i, smt_mask)
 				cpumask_set_cpu(i, cpu_sched_prio_mask + topo);
-			set_bit(topo, cpu_sched_prio_bitmap);
+			sched_prio_level_publish(topo);
 
 			topo += 3;
 			for_each_cpu(i, smt_mask)
 				cpumask_clear_cpu(i, cpu_sched_prio_mask + topo);
-			if (cpumask_empty(cpu_sched_prio_mask + topo))
-				clear_bit(topo, cpu_sched_prio_bitmap);
+			sched_prio_level_retire(topo);
 		} else {
 			topo += 3;
-			cpumask_set_cpu(cpu, cpu_sched_prio_mask + topo);
-			set_bit(topo, cpu_sched_prio_bitmap);
+			sched_prio_level_join(cpu, topo);
 		}
 		break;
 	}
 #endif
 	}
 
-	cpumask_set_cpu(cpu, sched_idle_mask);
-	set_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
+	sched_prio_level_join(cpu, SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO);
 }
 
 static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
@@ -121,9 +119,7 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 	case CPU_TOPOLOGY_PCORE:
 	case CPU_TOPOLOGY_ECORE:
 		topo--;
-		cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
-		if (cpumask_empty(cpu_sched_prio_mask + topo))
-			clear_bit(topo, cpu_sched_prio_bitmap);
+		sched_prio_level_leave(cpu, topo);
 		break;
 #ifdef CONFIG_SCHED_SMT
 	case CPU_TOPOLOGY_UCORE_SMT:
@@ -137,8 +133,7 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 		if (cpumask_test_cpu(cpu, cpu_sched_prio_mask + topo)) {
 			for_each_cpu(i, smt_mask)
 				cpumask_clear_cpu(i, cpu_sched_prio_mask + topo);
-			if (cpumask_empty(cpu_sched_prio_mask + topo))
-				clear_bit(topo, cpu_sched_prio_bitmap);
+			sched_prio_level_retire(topo);
 
 			topo += 3;
 			for_each_cpu(i, smt_mask) {
@@ -147,20 +142,16 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 				else
 					cpumask_set_cpu(i, cpu_sched_prio_mask + topo);
 			}
-			set_bit(topo, cpu_sched_prio_bitmap);
+			sched_prio_level_publish(topo);
 		} else {
 			topo += 3;
-			cpumask_clear_cpu(cpu, cpu_sched_prio_mask + topo);
-			if (cpumask_empty(cpu_sched_prio_mask + topo))
-				clear_bit(topo, cpu_sched_prio_bitmap);
+			sched_prio_level_leave(cpu, topo);
 		}
 	}
 #endif
 	}
 
-	cpumask_clear_cpu(cpu, sched_idle_mask);
-	if (cpumask_empty(sched_idle_mask))
-		clear_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
+	sched_prio_level_leave(cpu, SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO);
 }
 
 
@@ -363,7 +354,6 @@ static inline void sched_init_cpu_topology(void)
 static inline void sched_init_topology(void)
 {
 	int cpu;
-	bool clear_idle_mask_flag = false;
 
 	sched_init_cpu_topology();
 
@@ -382,10 +372,8 @@ static inline void sched_init_topology(void)
 		else if (cpumask_test_cpu(cpu, sched_ecore_mask))
 			cpu_topo += CPU_TOPOLOGY_ECORE;
 
-		if (cpu_topo) {
+		if (cpu_topo)
 			per_cpu(sched_cpu_topo, cpu) = cpu_topo;
-			clear_idle_mask_flag = true;
-		}
 
 		topo = per_cpu(cpu_affinity_masks, cpu);
 
@@ -410,7 +398,4 @@ static inline void sched_init_topology(void)
 				 (cpu_topo > CPU_TOPOLOGY_MASK) ? "(smt)" : "",
 				 per_cpu(sd_llc_id, cpu));
 	}
-
-	if (clear_idle_mask_flag)
-		clear_bit(SCHED_LEVELS - 1 - IDLE_TASK_SCHED_PRIO, cpu_sched_prio_bitmap);
 }
