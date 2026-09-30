@@ -243,7 +243,8 @@ static __always_inline void cpu_topo_balance(struct rq *rq)
 
 		for_each_cpu_wrap(i, cpu_topo_masks + level, start) {
 			/* Covers @i itself being idle: @i is in its smt mask. */
-			if (cpumask_intersects(cpu_smt_mask(i), sched_idle_mask))
+			if (!cpu_active(i) ||
+			    cpumask_intersects(cpu_smt_mask(i), sched_idle_mask))
 				continue;
 			if (topo_balance_try(i, rq, target_mask))
 				return;
@@ -253,7 +254,8 @@ static __always_inline void cpu_topo_balance(struct rq *rq)
 
 	if (2 != idx) {
 		for_each_cpu_wrap(i, sched_ecore_mask, start) {
-			if (cpumask_test_cpu(i, sched_idle_mask))
+			/* Offline CPUs are in no level, idle ones included. */
+			if (!cpu_active(i) || cpumask_test_cpu(i, sched_idle_mask))
 				continue;
 			if (topo_balance_try(i, rq, target_mask))
 				return;
