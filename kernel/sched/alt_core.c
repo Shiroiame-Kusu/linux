@@ -3750,6 +3750,29 @@ static inline void prepare_task(struct task_struct *next)
 
 static __always_inline void kick_preempt_cpu(const int cpu);
 
+/*
+ * Per-CPU kthreads -- kworkers, ksoftirqd, IRQ threads -- are the usual reason
+ * a running task gets preempted at all, and they are done within
+ * microseconds. Re-placing the preempted task through the grq then moves it
+ * off a warm cache, and wakes another CPU out of its idle state to take it, to
+ * dodge a wait that is already over by the time that CPU gets there: a lone
+ * busy loop on an otherwise idle machine was migrated 81 times in 5 s, and
+ * ~75% of all its preemptions ended in a migration.
+ *
+ * So @prev stays on this CPU's preempt_list instead, as a pinned task would,
+ * and resumes when the kthread is done. If the kthread keeps the CPU for a
+ * whole slice instead, pick_preempt_task() re-places @prev from there, so the
+ * wait is bounded by one slice. The stopper is excluded: when it preempts,
+ * it is to move @prev (active balance, affinity changes, hotplug).
+ */
+static __always_inline bool preempted_by_percpu_kthread(struct rq *rq, struct task_struct *prev)
+{
+	struct task_struct *curr = rq->curr;
+
+	return curr != rq->stop && (curr->flags & PF_KTHREAD) &&
+	       1 == curr->nr_cpus_allowed && is_cpu_allowed(prev, cpu_of(rq));
+}
+
 static inline void finish_task(struct task_struct *prev, struct rq *rq)
 {
 	/*
@@ -3766,14 +3789,16 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 	smp_store_release(&prev->on_cpu, 0);
 
 	/*
-	 * Enqueue prev if not rq->idle and prev is not blocked
+	 * Enqueue prev if not rq->idle and prev is not blocked: back on this
+	 * CPU's preempt_list if it cannot or should not move, else re-placed.
 	 */
 	if (prev != rq->idle && !rq->block) {
 		int cpu = cpu_of(rq);
 
 		WARN_ON_ONCE(READ_ONCE(prev->__sched_prio) != -1);
 
-		if (1 == prev->nr_cpus_allowed || is_migration_disabled(prev)) {
+		if (1 == prev->nr_cpus_allowed || is_migration_disabled(prev) ||
+		    preempted_by_percpu_kthread(rq, prev)) {
 			WRITE_ONCE(prev->wake_cpu, cpu);
 			WRITE_ONCE(prev->__sched_prio, -1);
 			WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
@@ -5213,11 +5238,21 @@ static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, i
 	struct task_struct *idle = rq->idle;
 	struct task_struct *next;
 	bool blocked = rq->block;
-	bool repicked = false;
+	bool repicked = false, defer_to_grq = true;
 	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO : READ_ONCE(cpu_prio(cpu)) + expired;
+	int grq_prio;
 
 repick:
-	if ((next = pick_preempt_task(cpu, pick_sched_prio)))
+	/*
+	 * The preempt_list only wins if the grq holds nothing better. Wakeup
+	 * placement and sticky preemption (finish_task()) both park tasks
+	 * there, and letting it win unconditionally would run a parked task
+	 * ahead of a higher-priority one that queued in the grq meanwhile --
+	 * e.g. while a kthread held this CPU. Ties still go to the list: its
+	 * tasks were placed on, or last ran on, this CPU.
+	 */
+	grq_prio = defer_to_grq ? find_first_bit(srq->bitmap, pick_sched_prio) : pick_sched_prio;
+	if ((next = pick_preempt_task(cpu, min(pick_sched_prio, grq_prio + 1))))
 		goto picked;
 
 	/* pick next task from schedule run queue */
@@ -5254,6 +5289,17 @@ repick:
 				raw_spin_unlock(lock);
 			}
 		}
+	}
+
+	/*
+	 * The grq looked better than the preempt_list but held nothing this
+	 * CPU may run (affinity). pick_preempt_task() re-placed the movable
+	 * entries it passed over; the ones it had to keep -- pinned or
+	 * migration-disabled -- must not be idled or starved next to. One-shot.
+	 */
+	if (grq_prio < pick_sched_prio && !is_preempt_list_empty(cpu)) {
+		defer_to_grq = false;
+		goto repick;
 	}
 
 	next = blocked ? idle : rq->curr;
