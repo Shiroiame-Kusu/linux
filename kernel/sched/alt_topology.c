@@ -188,7 +188,7 @@ trigger_active_balance(const int cpu, struct rq *src_rq, cpumask_t *target_mask)
 
 	arg = &rq->active_balance_arg;
 	p = rq->curr;
-	res = (p != rq->idle) && (0 == srq_nr_queued(cpu)) && is_preempt_list_empty(cpu) &&	\
+	res = (p != rq->idle) && !srq_has_queued(cpu) && is_preempt_list_empty(cpu) &&	\
 	      !is_migration_disabled(p) && cpumask_intersects(p->cpus_ptr, target_mask) &&	\
 	      !arg->active;
 	if (res)

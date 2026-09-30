@@ -148,11 +148,19 @@ bool srq_bucket_empty(struct sched_run_queue *srq, const int idx)
 	return list_empty(&srq->_fifo[idx]) && llist_empty(&srq->_head[idx]);
 }
 
+extern void srq_kick_idle_cpu(void);
+
 /*
  * Retire @idx's bitmap bit once its bucket has drained. Only _head[] can gain
  * an entry behind our back -- SRQ_ENQUEUE_TASK()'s llist_add() stays
  * lock-free -- so it alone needs the clear/re-check dance; _fifo[] is stable
  * under _lock[idx].
+ *
+ * The dance briefly shows a populated bucket as empty. A CPU entering idle
+ * that consulted srq_has_queued() in that window left without the late
+ * arrival, possibly after the enqueuer's own level scan had passed it over
+ * (it was not idle yet), so whoever re-sets the bit kicks an idle CPU for it.
+ * The window is a few instructions wide; this is rare.
  */
 static __always_inline
 void srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
@@ -162,7 +170,24 @@ void srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
 
 	clear_bit(idx, srq->bitmap);
 	smp_mb__after_atomic();
-	if (!llist_empty(&srq->_head[idx]))
+	if (!llist_empty(&srq->_head[idx])) {
+		set_bit(idx, srq->bitmap);
+		srq_kick_idle_cpu();
+	}
+}
+
+/*
+ * After an enqueue, make sure @idx's bit is set. Every enqueuer does this, not
+ * only the one whose llist_add() found the stack empty: that one may not have
+ * reached its set_bit() yet, and the bitmap is what a CPU entering idle
+ * consults (srq_has_queued()). llist_add()'s cmpxchg orders the enqueue before
+ * the read, and reading first keeps the common case -- bit already set --
+ * free of a locked RMW.
+ */
+static __always_inline
+void srq_bucket_bit_announce(struct sched_run_queue *srq, const int idx)
+{
+	if (!test_bit(idx, srq->bitmap))
 		set_bit(idx, srq->bitmap);
 }
 
@@ -253,7 +278,7 @@ struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx
 		WARN_ONCE(task_sched_prio(p) != idx, "sched: srq en/dequeue bug.\n");	\
 		__modify_body__								\
 		WRITE_ONCE(p->__sched_prio, -1);					\
-		atomic_dec(&srq->nr_queued);						\
+		this_cpu_dec(grq_nr_queued);						\
 		srq_bucket_bit_update(srq, idx);					\
 	}										\
 	__found;									\
@@ -265,9 +290,9 @@ struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx
 								\
 	WRITE_ONCE(p->__sched_prio, sched_prio);		\
 	__modify_body__						\
-	if (llist_add(&p->pq_node, &(srq)->_head[sched_prio]))	\
-		set_bit(sched_prio, (srq)->bitmap);		\
-	atomic_inc(&(srq)->nr_queued);				\
+	llist_add(&p->pq_node, &(srq)->_head[sched_prio]);	\
+	srq_bucket_bit_announce(srq, sched_prio);		\
+	this_cpu_inc(grq_nr_queued);				\
 }
 
 /*

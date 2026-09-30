@@ -231,7 +231,6 @@ static inline void sched_run_queue_init(struct sched_run_queue *q)
 		INIT_LIST_HEAD(&q->_fifo[i]);
 	}
 	bitmap_zero(q->bitmap, SCHED_QUEUE_BITS);
-	atomic_set(&q->nr_queued, 0);
 	atomic_set(&q->nr_uninterruptible, 0);
 	atomic_set(&q->nr_iowait, 0);
 }
@@ -726,7 +725,7 @@ static inline void sched_update_tick_dependency(struct rq *rq)
 		return;
 
 	if ((IDLE_TASK_SCHED_PRIO != READ_ONCE(cpu_prio(cpu))) &&
-	    (0 == srq_nr_queued(cpu)) && is_preempt_list_empty(cpu))
+	    !srq_has_queued(cpu) && is_preempt_list_empty(cpu))
 		tick_nohz_dep_clear_cpu(cpu, TICK_DEP_BIT_SCHED);
 	else
 		tick_nohz_dep_set_cpu(cpu, TICK_DEP_BIT_SCHED);
@@ -1558,6 +1557,26 @@ static __always_inline void kick_idle_for_queued(struct task_struct *p, const in
 	smp_mb__after_atomic();
 	for_each_cpu_and(cpu, p->cpus_ptr, sched_idle_mask) {
 		if (cpu != skip && is_cpu_allowed(p, cpu)) {
+			kick_preempt_cpu(cpu);
+			return;
+		}
+	}
+}
+
+/*
+ * Kick one idle CPU on behalf of a grq task that srq_bucket_bit_update() saw
+ * arrive while its bucket's bit read clear; see there. The task's affinity is
+ * unknown here, so any active idle CPU will do: if it cannot run the task,
+ * its go-idle scan (wakeup_srq_task()) kicks one that can.
+ */
+void srq_kick_idle_cpu(void)
+{
+	int cpu, this_cpu = smp_processor_id();
+
+	/* Order the bit's re-set before reading the idle level. */
+	smp_mb__after_atomic();
+	for_each_cpu_and(cpu, sched_idle_mask, cpu_active_mask) {
+		if (cpu != this_cpu) {
 			kick_preempt_cpu(cpu);
 			return;
 		}
@@ -2929,7 +2948,7 @@ static inline bool ttwu_queue_cond(struct task_struct *p, int cpu)
 	 * p->on_cpu can be whatever, we've done the dequeue, so
 	 * the wakee has been accounted out of ->nr_running.
 	 */
-	if (cpumask_test_cpu(cpu, sched_idle_mask) && !srq_nr_queued(cpu) &&
+	if (cpumask_test_cpu(cpu, sched_idle_mask) && !srq_has_queued(cpu) &&
 	    is_preempt_list_empty(cpu))
 		return true;
 
@@ -4303,9 +4322,27 @@ context_switch(struct rq *rq, struct task_struct *prev,
  * externally visible scheduler statistics: current number of runnable
  * threads, total number of context switches performed since bootup.
  */
+DEFINE_PER_CPU(int, grq_nr_queued);
+
+/*
+ * Exact grq length, for the few that need a count (nr_running(), loadavg).
+ * A task is counted on the CPU that enqueued it and discounted on the one
+ * that dequeued it, so only the sum means anything; read locklessly it can
+ * catch a dequeue before its enqueue, hence the clamp.
+ */
+static unsigned int grq_nr_queued_sum(void)
+{
+	int cpu, sum = 0;
+
+	for_each_possible_cpu(cpu)
+		sum += per_cpu(grq_nr_queued, cpu);
+
+	return max(sum, 0);
+}
+
 unsigned int nr_running(void)
 {
-	return srq_nr_queued(0) + num_active_cpus() - cpumask_weight(sched_idle_mask);
+	return grq_nr_queued_sum() + num_active_cpus() - cpumask_weight(sched_idle_mask);
 }
 
 /*
@@ -4326,7 +4363,7 @@ bool single_task_running(void)
 	const int cpu = cpu_of(raw_rq());
 
 	return cpumask_test_cpu(cpu, sched_idle_mask) &&
-	       (0 == srq_nr_queued(0)) && is_preempt_list_empty(cpu);
+	       !srq_has_queued(cpu) && is_preempt_list_empty(cpu);
 }
 EXPORT_SYMBOL(single_task_running);
 
@@ -4905,7 +4942,7 @@ static void alt_sched_srq_show(struct seq_file *m, struct sched_run_queue *srq)
 	int idx = find_first_bit(srq->bitmap, SCHED_QUEUE_BITS);
 
 	seq_printf(m, "grq: nr_queued %d, bitmap 0x%016lx, first bucket %d\n",
-		   srq_nr_queued(0), srq->bitmap[0], idx);
+		   grq_nr_queued_sum(), srq->bitmap[0], idx);
 
 	if (SCHED_QUEUE_BITS != idx) {
 		struct task_struct *oldest = NULL;
@@ -5347,7 +5384,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		if (task_cpu(next) != cpu)							\
 			set_task_cpu(next, cpu);						\
 		WRITE_ONCE(next->__sched_prio, -1);						\
-		atomic_dec(&srq->nr_queued);							\
+		this_cpu_dec(grq_nr_queued);							\
 		srq_bucket_bit_update(srq, idx);						\
 		raw_spin_unlock(lock);								\
 		goto picked;									\
@@ -5443,7 +5480,7 @@ repick:
 			update_sched_cpu_prio(cpu, IDLE_TASK_SCHED_PRIO);
 			smp_mb__after_atomic();
 
-			if (srq_nr_queued(cpu)) {
+			if (srq_has_queued(cpu)) {
 				int sidx = wakeup_srq_task(cpu);
 
 				/*
@@ -5638,7 +5675,7 @@ static void __sched notrace __schedule(int sched_mode)
 	 */
 	prev_state = READ_ONCE(prev->__state);
 	if (sched_mode == SM_IDLE) {
-		if (!srq_nr_queued(cpu) && is_preempt_list_empty(cpu)) {
+		if (!srq_has_queued(cpu) && is_preempt_list_empty(cpu)) {
 			next = prev;
 			goto picked;
 		}
