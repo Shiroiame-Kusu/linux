@@ -5449,6 +5449,12 @@ static void __sched notrace __schedule(int sched_mode)
 	}
 
 	expired = check_curr(rq->curr, rq);
+	/*
+	 * After check_curr(): its update_curr() rewrites prev->last_ran, which
+	 * the policy may reuse as the sleep stamp of a blocked task.
+	 */
+	if (rq->block)
+		sched_task_sleep(prev, rq);
 	next = pick_next_task(cpu, rq, expired);
 picked:
 	sched_update_tick_dependency(rq);
