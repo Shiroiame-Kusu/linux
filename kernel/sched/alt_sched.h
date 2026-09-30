@@ -487,19 +487,20 @@ struct sched_run_queue {
 	/*
 	 * Deliberate cache-line separation: the bitmap is read by every
 	 * pick on every CPU and RMW'd on bucket-emptiness transitions --
-	 * unpadded it shared a line with the last _head[] buckets.
-	 * nr_queued takes two atomic RMWs per enqueue/dequeue cycle from
-	 * all CPUs and must not force those writes onto the bitmap
-	 * readers' line, nor onto the (rarer, sleep-path) loadavg/iowait
-	 * counters below.
+	 * unpadded it shared a line with the last _head[] buckets. It is
+	 * also the grq's "anything queued?" signal, srq_has_queued(). The
+	 * exact length lives in per-CPU counters (grq_nr_queued), so no
+	 * enqueue or dequeue RMWs a line shared by every CPU to keep it.
+	 * The (rarer, sleep-path) loadavg/iowait counters get their own
+	 * line.
 	 */
 	DECLARE_BITMAP(bitmap, SCHED_QUEUE_BITS) ____cacheline_aligned;
-	atomic_t		nr_queued ____cacheline_aligned;
 	atomic_t		nr_uninterruptible ____cacheline_aligned;
 	atomic_t		nr_iowait;
 };
 
 extern struct sched_run_queue grq;
+DECLARE_PER_CPU(int, grq_nr_queued);
 DECLARE_PER_CPU_SHARED_ALIGNED(struct llist_head, preempt_list);
 
 static inline bool is_preempt_list_empty(const int cpu)
@@ -520,9 +521,17 @@ static inline struct sched_run_queue *rq_srq(struct rq *rq)
 	return cpu_srq(cpu_of(rq));
 }
 
-static inline int srq_nr_queued(const int cpu)
+/*
+ * Whether the grq holds a task, read off the bucket bitmap every pick reads
+ * anyway. Every enqueuer makes sure its bucket's bit is set (SRQ_ENQUEUE_TASK()),
+ * and the one transient clear of a populated bucket's bit --
+ * srq_bucket_bit_update()'s clear-and-recheck -- kicks an idle CPU when it
+ * finds a late arrival, so a CPU entering idle on a stale "empty" is woken.
+ */
+static inline bool srq_has_queued(const int cpu)
 {
-	return raw_atomic_read(&cpu_srq(cpu)->nr_queued);
+	BUILD_BUG_ON(SCHED_QUEUE_BITS > BITS_PER_LONG);
+	return READ_ONCE(cpu_srq(cpu)->bitmap[0]) & BITMAP_LAST_WORD_MASK(SCHED_QUEUE_BITS);
 }
 
 static inline unsigned int nr_uninterruptible(void)
@@ -534,7 +543,7 @@ static inline bool idle_rq(struct rq *rq)
 {
 	int cpu = cpu_of(rq);
 
-	return rq->curr == rq->idle && !srq_nr_queued(cpu) &&
+	return rq->curr == rq->idle && !srq_has_queued(cpu) &&
 	       is_preempt_list_empty(cpu) && !rq->ttwu_pending;
 }
 
