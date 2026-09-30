@@ -192,6 +192,28 @@ static __always_inline void sched_prio_level_leave(const int cpu, const int idx)
 
 #include "alt_topology.c"
 
+static __always_inline void sched_cpu_level_leave(const int cpu, const int prio)
+{
+	if (IDLE_TASK_SCHED_PRIO == prio)
+		sched_clear_idle_mask(cpu);
+	else
+		sched_prio_level_leave(cpu, SCHED_LEVELS - 1 - prio);
+}
+
+static __always_inline void sched_cpu_level_join(const int cpu, const int prio)
+{
+	if (IDLE_TASK_SCHED_PRIO == prio)
+		sched_set_idle_mask(cpu);
+	else
+		sched_prio_level_join(cpu, SCHED_LEVELS - 1 - prio);
+}
+
+/*
+ * cpu_prio() always tracks the CPU's current task, but the CPU is published in
+ * cpu_sched_prio_mask[] only while its rq is online: set_rq_offline() takes it
+ * out of its level and set_rq_online() puts it back in at whatever cpu_prio()
+ * says then. Both run under this rq->lock, as every caller of this does.
+ */
 static __always_inline void update_sched_cpu_prio(const int cpu, const int prio)
 {
 	int last_prio = READ_ONCE(cpu_prio(cpu));
@@ -201,15 +223,11 @@ static __always_inline void update_sched_cpu_prio(const int cpu, const int prio)
 
 	WRITE_ONCE(cpu_prio(cpu), prio);
 
-	if (IDLE_TASK_SCHED_PRIO == last_prio)
-		sched_clear_idle_mask(cpu);
-	else
-		sched_prio_level_leave(cpu, SCHED_LEVELS - 1 - last_prio);
+	if (!cpu_rq(cpu)->online)
+		return;
 
-	if (IDLE_TASK_SCHED_PRIO == prio)
-		sched_set_idle_mask(cpu);
-	else
-		sched_prio_level_join(cpu, SCHED_LEVELS - 1 - prio);
+	sched_cpu_level_leave(cpu, last_prio);
+	sched_cpu_level_join(cpu, prio);
 }
 
 /* task function */
@@ -2034,21 +2052,30 @@ __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
 		cpumask_t *mask;
 		const struct cpumask *prio_mask = cpu_sched_prio_mask + idx;
 
-		if (filter_test_cpu && cpu != skip_cpu && cpumask_test_cpu(cpu, prio_mask)) {
+		/*
+		 * Only CPUs @p may run on right now: the levels hold online CPUs
+		 * only, but a CPU stays in them for a moment after it stops being
+		 * active, and callers such as wake_up_new_task() and
+		 * wakeup_modified_task() park @p on the rq returned here without
+		 * re-checking.
+		 */
+		if (filter_test_cpu && cpu != skip_cpu && cpumask_test_cpu(cpu, prio_mask) &&
+		    is_cpu_allowed(p, cpu)) {
 			rq = cpu_rq(cpu);
 			if (raw_spin_trylock(&rq->lock))
 				return rq;
-			if (*kick_cpu >= nr_cpu_ids && is_cpu_allowed(p, cpu))
+			if (*kick_cpu >= nr_cpu_ids)
 				*kick_cpu = cpu;
 		}
 		for (mask = per_cpu(cpu_affinity_masks, cpu); mask < end_mask; mask++) {
 			int i;
 			for_each_cpu_and (i, filter, mask)
-				if (i != skip_cpu && cpumask_test_cpu(i, prio_mask)) {
+				if (i != skip_cpu && cpumask_test_cpu(i, prio_mask) &&
+				    is_cpu_allowed(p, i)) {
 					rq = cpu_rq(i);
 					if (raw_spin_trylock(&rq->lock))
 						return rq;
-					if (*kick_cpu >= nr_cpu_ids && is_cpu_allowed(p, i))
+					if (*kick_cpu >= nr_cpu_ids)
 						*kick_cpu = i;
 				}
 		}
@@ -2132,8 +2159,9 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
  * balance, typically the very E-core the stopper just preempted it on, which
  * re-picks it microseconds before the idle P-core it was meant for has left
  * its idle state. The handoff is made only while the target, re-checked under
- * its lock, will run the task promptly: allowed for it (a dead CPU stays at
- * the idle level), and idle or running something the task outranks.
+ * its lock, will run the task promptly: still allowed for it (the scan's
+ * unlocked check can go stale), and idle or running something the task
+ * outranks.
  */
 static __always_inline bool preempt_handoff_ok(struct task_struct *p, struct rq *rq)
 {
@@ -4383,7 +4411,13 @@ static unsigned int grq_nr_queued_sum(void)
 
 unsigned int nr_running(void)
 {
-	return grq_nr_queued_sum() + num_active_cpus() - cpumask_weight(sched_idle_mask);
+	/*
+	 * Busy CPUs counted directly. The old "active minus idle" wraps to
+	 * ~4 billion as soon as the idle mask holds more CPUs than are active
+	 * and queued -- as it could while a suspend was taking CPUs down,
+	 * when every dead CPU stayed in it.
+	 */
+	return grq_nr_queued_sum() + cpumask_weight_andnot(cpu_active_mask, sched_idle_mask);
 }
 
 /*
@@ -7002,18 +7036,34 @@ static inline void balance_hotplug_wait(void)
 }
 #endif /* !CONFIG_HOTPLUG_CPU */
 
+/*
+ * A CPU going down used to stay in the priority levels, and the last level it
+ * joined was idle -- its final switch before dying is to the idle task. Wakeup
+ * placement then took it for the best target there is: every suspend here
+ * logged 15-20 "Unexpected reschedule of offline CPU" warnings, as the
+ * stop_machine() of each CPU takedown preempted tasks that were then re-placed
+ * onto CPUs already dead; paths that park a task on its target's preempt_list
+ * rather than the grq would have left it there until resume.
+ *
+ * So the CPU leaves its level here, in sched_cpu_deactivate(), and
+ * update_sched_cpu_prio() keeps it out until sched_cpu_activate() brings it
+ * back in at its current level.
+ */
 static void set_rq_offline(struct rq *rq)
 {
 	if (rq->online) {
 		update_rq_clock(rq);
 		rq->online = false;
+		sched_cpu_level_leave(cpu_of(rq), READ_ONCE(cpu_prio(cpu_of(rq))));
 	}
 }
 
 static void set_rq_online(struct rq *rq)
 {
-	if (!rq->online)
+	if (!rq->online) {
 		rq->online = true;
+		sched_cpu_level_join(cpu_of(rq), READ_ONCE(cpu_prio(cpu_of(rq))));
+	}
 }
 
 static inline void sched_set_rq_online(struct rq *rq, int cpu)
