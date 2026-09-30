@@ -89,7 +89,7 @@ extern void wakeup_modified_task(struct task_struct *p);
  */
 /*
  * Unlink @target from the producer stack @head in place. The caller must hold
- * the bucket's _lock[idx]: all removers (SRQ_DEQUEUE_TASK(), and the
+ * the bucket's lock: all removers (SRQ_DEQUEUE_TASK(), and the
  * srq_bucket_refill() drain) serialize on it, so interior ->next pointers
  * are stable under the lock. The only lock-free writer is SRQ_ENQUEUE_TASK()'s
  * llist_add(), which just prepends -- it can only race the head cmpxchg,
@@ -103,7 +103,7 @@ extern void wakeup_modified_task(struct task_struct *p);
  * A false return is a legitimate, self-healing race, not a bug.
  * SRQ_ENQUEUE_TASK() publishes p->__sched_prio (and on_rq=QUEUED) before
  * its lock-free llist_add(), so a concurrent __task_modify_lock() dequeuer
- * holding _lock[idx] can observe the membership token while pq_node is not
+ * holding the bucket lock can observe the membership token while pq_node is not
  * yet linked. SRQ_DEQUEUE_TASK() then returns false and every caller
  * (__task_modify_lock / task_access_lock) retries until the enqueue is
  * visible. The reverse store order would instead leave pq_node linked with
@@ -139,22 +139,23 @@ bool sched_llist_unlink(struct llist_head *head, struct llist_node *target)
 
 /*
  * A bucket is empty only when both of its representations are: the lock-free
- * producer stack _head[] and the consumer FIFO _fifo[] the pick drains it
- * into. Caller must hold _lock[idx].
+ * producer stack (arrivals[idx]) and the consumer FIFO the pick drains it
+ * into (bucket[idx].fifo). Caller must hold bucket[idx].lock.
  */
 static __always_inline
 bool srq_bucket_empty(struct sched_run_queue *srq, const int idx)
 {
-	return list_empty(&srq->_fifo[idx]) && llist_empty(&srq->_head[idx]);
+	return list_empty(&srq->bucket[idx].fifo) &&
+	       llist_empty(&srq->arrivals[idx].head);
 }
 
 extern void srq_kick_idle_cpu(void);
 
 /*
- * Retire @idx's bitmap bit once its bucket has drained. Only _head[] can gain
- * an entry behind our back -- SRQ_ENQUEUE_TASK()'s llist_add() stays
- * lock-free -- so it alone needs the clear/re-check dance; _fifo[] is stable
- * under _lock[idx].
+ * Retire @idx's bitmap bit once its bucket has drained. Only the arrivals
+ * stack can gain an entry behind our back -- SRQ_ENQUEUE_TASK()'s llist_add()
+ * stays lock-free -- so it alone needs the clear/re-check dance; the FIFO is
+ * stable under the bucket lock.
  *
  * The dance briefly shows a populated bucket as empty. A CPU entering idle
  * that consulted srq_has_queued() in that window left without the late
@@ -170,7 +171,7 @@ void srq_bucket_bit_update(struct sched_run_queue *srq, const int idx)
 
 	clear_bit(idx, srq->bitmap);
 	smp_mb__after_atomic();
-	if (!llist_empty(&srq->_head[idx])) {
+	if (!llist_empty(&srq->arrivals[idx].head)) {
 		set_bit(idx, srq->bitmap);
 		srq_kick_idle_cpu();
 	}
@@ -193,15 +194,17 @@ void srq_bucket_bit_announce(struct sched_run_queue *srq, const int idx)
 
 /*
  * Splice the bucket's lock-free arrivals onto the tail of its consumer FIFO,
- * oldest first. Caller holds _lock[idx]; the FIFO may be empty or populated
- * (the latter when it holds only tasks restricted away from the picking CPU).
+ * oldest first. Caller holds the bucket lock; the FIFO may be empty or
+ * populated (the latter when it holds only tasks restricted away from the
+ * picking CPU).
  *
  * llist_del_all() hands the batch back newest-first, and every entry goes in
  * directly after @anchor -- the FIFO's tail as it stood before the drain --
  * so the batch is reversed as it is spliced. One pass does what a
  * llist_reverse_order() plus an append pass did, touching each task's
  * cachelines once. FIFO order holds across both batches because every entry
- * already on _fifo[] was enqueued before anything still on _head[].
+ * already on the FIFO was enqueued before anything still on the arrivals
+ * stack.
  *
  * This is what makes the pick amortised O(1): a task is reordered exactly
  * once on its way through the bucket, rather than the whole bucket being
@@ -213,9 +216,9 @@ void srq_bucket_bit_announce(struct sched_run_queue *srq, const int idx)
 static __always_inline
 struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx)
 {
-	struct list_head *fifo = &srq->_fifo[idx];
+	struct list_head *fifo = &srq->bucket[idx].fifo;
 	struct list_head *anchor = fifo->prev;
-	struct llist_node *node = llist_del_all(&srq->_head[idx]);
+	struct llist_node *node = llist_del_all(&srq->arrivals[idx].head);
 
 	while (node) {
 		struct task_struct *p = llist_entry(node, struct task_struct, pq_node);
@@ -243,19 +246,20 @@ struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx
 	bool __found;									\
 											\
 	/*										\
-	 * Under _lock[idx] a linked pq_fifo means the pick already drained @p	\
-	 * out of the producer stack, so the unlink is an O(1) list_del().	\
-	 * Otherwise @p is still in _head[] and needs the walk, bounded by the	\
-	 * arrivals since the last drain -- which under sustained load still	\
-	 * approaches the bucket length. That is tolerable only because this	\
-	 * path (setaffinity, set_user_nice, wait_task_inactive, cgroup moves)	\
-	 * is orders of magnitude colder than the pick; it is not O(1).		\
+	 * Under the bucket lock a linked pq_fifo means the pick has drained	\
+	 * @p out of the producer stack, so the unlink is an O(1) list_del().	\
+	 * Otherwise @p is still on the arrivals stack and needs the walk,	\
+	 * bounded by the arrivals since the last drain -- which under		\
+	 * sustained load still approaches the bucket length. That is tolerable	\
+	 * only because this path (setaffinity, set_user_nice,			\
+	 * wait_task_inactive, cgroup moves) is orders of magnitude colder than	\
+	 * the pick; it is not O(1).						\
 	 */										\
 	if (!list_empty(&p->pq_fifo)) {							\
 		list_del_init(&p->pq_fifo);						\
 		__found = true;								\
 	} else {									\
-		__found = sched_llist_unlink(&srq->_head[idx], &p->pq_node);		\
+		__found = sched_llist_unlink(&srq->arrivals[idx].head, &p->pq_node);	\
 	}										\
 											\
 	if (__found) {									\
@@ -290,7 +294,7 @@ struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx
 								\
 	WRITE_ONCE(p->__sched_prio, sched_prio);		\
 	__modify_body__						\
-	llist_add(&p->pq_node, &(srq)->_head[sched_prio]);	\
+	llist_add(&p->pq_node, &(srq)->arrivals[sched_prio].head);	\
 	srq_bucket_bit_announce(srq, sched_prio);		\
 	this_cpu_inc(grq_nr_queued);				\
 }
@@ -338,7 +342,7 @@ static inline struct rq *__task_modify_lock(struct task_struct *p, struct rq_fla
 				raw_spin_unlock(&rq->lock);
 			} else if ((idx = READ_ONCE(p->__sched_prio)) != -1) {
 				struct sched_run_queue *srq = cpu_srq(0);
-				raw_spinlock_t *lock = &srq->_lock[idx];
+				raw_spinlock_t *lock = &srq->bucket[idx].lock;
 
 				raw_spin_lock(lock);
 				if (task_on_rq_queued(p) && !p->on_cpu &&

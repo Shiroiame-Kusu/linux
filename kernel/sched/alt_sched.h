@@ -470,29 +470,46 @@ extern void resched_cpu(int cpu);
 #define SCHED_QUEUE_BITS	(SCHED_LEVELS - 1)
 #define IDLE_TASK_PRIO		(MIN_NORMAL_PRIO + NORMAL_PRIO_NUM)
 
+/*
+ * A grq bucket's consumer side: the lock a pick takes and the FIFO it pops,
+ * sharing one line, with no two buckets on the same line. As parallel arrays,
+ * 16 bucket locks shared a line -- every pick of a busy bucket bounced it
+ * under the pickers of up to 15 others -- and a pick fetched the lock's line
+ * and the FIFO's line separately.
+ *
+ * The FIFO exists because the producer side (struct srq_arrivals) is a
+ * lock-free LIFO stack, so deriving FIFO order from it meant walking to its
+ * tail on every pick -- O(queue length) inside the lock, and the queue length
+ * is exactly what oversubscription grows. The pick instead pops the FIFO and,
+ * when that runs dry, drains the arrivals into it in one pass: each task is
+ * reordered once on its way through rather than the whole bucket being walked
+ * once per pick. Only ever touched under the bucket lock, so no atomics and no
+ * emptiness re-check are needed.
+ */
+struct srq_bucket {
+	raw_spinlock_t		lock;
+	struct list_head	fifo;
+} ____cacheline_aligned;
+
+/*
+ * A grq bucket's producer side, the lock-free stack SRQ_ENQUEUE_TASK() pushes
+ * onto from every CPU. On a line of its own, so those cmpxchgs do not steal
+ * the consumer line from a lock holder in the middle of a pick.
+ */
+struct srq_arrivals {
+	struct llist_head	head;
+} ____cacheline_aligned;
+
 struct sched_run_queue {
-	raw_spinlock_t		_lock[SCHED_QUEUE_BITS];
-	struct llist_head	_head[SCHED_QUEUE_BITS];
+	struct srq_bucket	bucket[SCHED_QUEUE_BITS];
+	struct srq_arrivals	arrivals[SCHED_QUEUE_BITS];
 	/*
-	 * Consumer side of each bucket. _head[] is a lock-free LIFO stack,
-	 * so deriving FIFO order from it meant walking to its tail on every
-	 * pick -- O(queue length) inside _lock[], and the queue length is
-	 * exactly what oversubscription grows. The pick instead pops _fifo[]
-	 * and, when that runs dry, drains _head[] into it in one pass: each
-	 * task is reordered once on its way through rather than the whole
-	 * bucket being walked once per pick. Only ever touched under
-	 * _lock[idx], so no atomics and no emptiness re-check are needed.
-	 */
-	struct list_head	_fifo[SCHED_QUEUE_BITS];
-	/*
-	 * Deliberate cache-line separation: the bitmap is read by every
-	 * pick on every CPU and RMW'd on bucket-emptiness transitions --
-	 * unpadded it shared a line with the last _head[] buckets. It is
-	 * also the grq's "anything queued?" signal, srq_has_queued(). The
-	 * exact length lives in per-CPU counters (grq_nr_queued), so no
-	 * enqueue or dequeue RMWs a line shared by every CPU to keep it.
-	 * The (rarer, sleep-path) loadavg/iowait counters get their own
-	 * line.
+	 * The bitmap is read by every pick on every CPU and RMW'd on
+	 * bucket-emptiness transitions. It is also the grq's "anything
+	 * queued?" signal, srq_has_queued(). The exact length lives in
+	 * per-CPU counters (grq_nr_queued), so no enqueue or dequeue RMWs a
+	 * line shared by every CPU to keep it. The (rarer, sleep-path)
+	 * loadavg/iowait counters get a line of their own.
 	 */
 	DECLARE_BITMAP(bitmap, SCHED_QUEUE_BITS) ____cacheline_aligned;
 	atomic_t		nr_uninterruptible ____cacheline_aligned;
