@@ -2050,9 +2050,10 @@ __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
 		    const int skip_cpu, int *kick_cpu)
 {
 	struct rq *rq;
-	int idx, preempt_idx = SCHED_LEVELS - 1 - sched_prio, cpu = task_cpu(p);
+	int preempt_idx = SCHED_LEVELS - 1 - sched_prio, cpu = task_cpu(p);
 	const bool try_prev = cpu != skip_cpu && is_cpu_allowed(p, cpu);
 	cpumask_t *end_mask = per_cpu(cpu_affinity_end_mask, cpu);
+	unsigned long levels;
 
 	*kick_cpu = nr_cpu_ids;
 
@@ -2074,9 +2075,10 @@ __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
 		*kick_cpu = cpu;
 	}
 
-	for_each_set_bit (idx, cpu_sched_prio_bitmap, preempt_idx) {
+	levels = sched_bits_below(cpu_sched_prio_bitmap, preempt_idx);
+	for (; levels; levels &= levels - 1) {
 		cpumask_t *mask;
-		const struct cpumask *prio_mask = cpu_sched_prio_mask + idx;
+		const struct cpumask *prio_mask = cpu_sched_prio_mask + __ffs(levels);
 
 		/*
 		 * Only CPUs @p may run on right now: the levels hold online CPUs
@@ -5431,6 +5433,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 	for_each_set_bit(idx, srq->bitmap, SCHED_QUEUE_BITS) {
 		raw_spinlock_t *lock = &srq->bucket[idx].lock;
 		struct task_struct *p;
+		unsigned long levels;
 		int preempt_idx;
 		bool can_kick;
 
@@ -5470,18 +5473,19 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		 * ever changes under the bucket lock, which we hold.
 		 */
 		preempt_idx = SCHED_LEVELS - 1 - idx;
-		can_kick = !bitmap_empty(cpu_sched_prio_bitmap, preempt_idx);
+		levels = sched_bits_below(cpu_sched_prio_bitmap, preempt_idx);
+		can_kick = levels != 0;
 
 		list_for_each_entry(p, &srq->bucket[idx].fifo, pq_fifo) {
-			int j;
+			unsigned long bits;
 
 			if (strand_idx < 0 && is_cpu_allowed(p, cpu))
 				strand_idx = idx;
 
-			for_each_set_bit(j, cpu_sched_prio_bitmap, preempt_idx) {
+			for (bits = levels; bits; bits &= bits - 1) {
 				int i;
 
-				for_each_cpu_and(i, p->cpus_ptr, cpu_sched_prio_mask + j) {
+				for_each_cpu_and(i, p->cpus_ptr, cpu_sched_prio_mask + __ffs(bits)) {
 					if (i == cpu || !is_cpu_allowed(p, i))
 						continue;
 					kick_cpu = i;
@@ -5602,6 +5606,7 @@ static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, i
 	 */
 	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO :
 				        task_sched_prio(rq->curr) + expired;
+	unsigned long queued;
 	int grq_prio;
 
 repick:
@@ -5613,12 +5618,14 @@ repick:
 	 * e.g. while a kthread held this CPU. Ties still go to the list: its
 	 * tasks were placed on, or last ran on, this CPU.
 	 */
-	grq_prio = defer_to_grq ? find_first_bit(srq->bitmap, pick_sched_prio) : pick_sched_prio;
+	queued = sched_bits_below(srq->bitmap, pick_sched_prio);
+	grq_prio = (defer_to_grq && queued) ? __ffs(queued) : pick_sched_prio;
 	if ((next = pick_preempt_task(cpu, min(pick_sched_prio, grq_prio + 1))))
 		goto picked;
 
 	/* pick next task from schedule run queue */
-	if (!bitmap_empty(srq->bitmap, pick_sched_prio)) {
+	queued = sched_bits_below(srq->bitmap, pick_sched_prio);
+	if (queued) {
 		int idx;
 
 		/*
@@ -5633,9 +5640,11 @@ repick:
 		 * off the consumer FIFO), so waiting beats picking the wrong
 		 * task.
 		 */
-		for_each_set_bit(idx, srq->bitmap, pick_sched_prio) {
-			raw_spinlock_t	*lock = &srq->bucket[idx].lock;
+		for (; queued; queued &= queued - 1) {
+			raw_spinlock_t	*lock;
 
+			idx = __ffs(queued);
+			lock = &srq->bucket[idx].lock;
 			if (!raw_spin_trylock(lock))
 				break;
 			PQ_PICK_TASK;
@@ -5654,11 +5663,12 @@ repick:
 		 * on 24 CPUs managed 4.7M yields/s against 57.6M for 24, and
 		 * at 48 threads 79% of all cycles spun here.
 		 */
-		if (idx < pick_sched_prio &&
-		    (blocked || idx < task_sched_prio(rq->curr))) {
-			for_each_set_bit_from(idx, srq->bitmap, pick_sched_prio) {
-				raw_spinlock_t	*lock = &srq->bucket[idx].lock;
+		if (queued && (blocked || idx < task_sched_prio(rq->curr))) {
+			for (; queued; queued &= queued - 1) {
+				raw_spinlock_t	*lock;
 
+				idx = __ffs(queued);
+				lock = &srq->bucket[idx].lock;
 				raw_spin_lock(lock);
 				PQ_PICK_TASK;
 				raw_spin_unlock(lock);

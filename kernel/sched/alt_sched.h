@@ -469,6 +469,22 @@ extern void resched_cpu(int cpu);
 #define IDLE_TASK_PRIO		(MIN_NORMAL_PRIO + NORMAL_PRIO_NUM)
 
 /*
+ * A snapshot of bits [0, @n) of a one-word scheduler bitmap -- the grq
+ * bucket bitmap or cpu_sched_prio_bitmap. Their scans stop at a priority
+ * known only at run time, and find_*_bit() inline only for compile-time
+ * sizes, so every step of such a scan was an out-of-line call. Scanning the
+ * returned word with __ffs() is a few instructions. A snapshot is all the
+ * callers need: each of them tolerates bits changing under it.
+ */
+static __always_inline unsigned long sched_bits_below(const unsigned long *map,
+						      const unsigned int n)
+{
+	BUILD_BUG_ON(SCHED_LEVELS > BITS_PER_LONG);
+
+	return n ? READ_ONCE(map[0]) & (~0UL >> (BITS_PER_LONG - n)) : 0;
+}
+
+/*
  * A grq bucket's consumer side: the lock a pick takes and the FIFO it pops,
  * sharing one line, with no two buckets on the same line. As parallel arrays,
  * 16 bucket locks shared a line -- every pick of a busy bucket bounced it
