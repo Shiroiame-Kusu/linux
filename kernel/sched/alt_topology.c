@@ -53,6 +53,12 @@ enum cpu_topo_type {
 
 #define CPU_TOPOLOGY_MASK	(0x03)
 
+/*
+ * cpu_sched_prio_mask[] index of the fully idle P-cores (with SMT: both
+ * siblings idle), see sched_set_idle_mask(). Level 0 holds the U-cores.
+ */
+#define SCHED_PCORE_IDLE_LEVEL	(CPU_TOPOLOGY_PCORE - 1)
+
 static DEFINE_PER_CPU_READ_MOSTLY(enum cpu_topo_type, sched_cpu_topo);
 
 static __always_inline void sched_set_idle_mask(const unsigned int cpu)
