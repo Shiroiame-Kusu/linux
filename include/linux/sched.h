@@ -889,8 +889,13 @@ struct task_struct {
 	unsigned int			rt_priority;
 
 #ifdef CONFIG_SCHED_ALT
-	u64				last_ran;
-	s64				time_slice;
+	/*
+	 * Everything a grq enqueue, pick and dequeue touches -- these, and
+	 * prio for task_sched_prio() -- shares one cache line, mostly a
+	 * remote task's under a bucket lock every picker queues on.
+	 * __sched_prio fills the hole after rt_priority on 64-bit.
+	 */
+	int				__sched_prio;
 	struct llist_node		pq_node;
 	/*
 	 * GRQ bucket membership has two representations: the lock-free
@@ -900,10 +905,11 @@ struct task_struct {
 	 * pq_fifo is the discriminator -- see SRQ_DEQUEUE_TASK().
 	 */
 	struct list_head		pq_fifo;
-	int				__sched_prio;
 #ifdef CONFIG_SCHED_BMQ
 	int				boost_prio;
 #endif /* CONFIG_SCHED_BMQ */
+	u64				last_ran;
+	s64				time_slice;
 #ifdef CONFIG_SCHED_PDS
 	u64				deadline;
 #endif /* CONFIG_SCHED_PDS */
@@ -963,12 +969,19 @@ struct task_struct {
 	unsigned int			policy;
 	unsigned long			max_allowed_capacity;
 	int				nr_cpus_allowed;
+#ifdef CONFIG_SCHED_ALT
+	/*
+	 * Next to cpus_ptr: is_cpu_allowed() reads both, mostly of a remote
+	 * task, and cpus_mask (NR_CPUS bits) would otherwise lie in between.
+	 */
+	unsigned short			migration_disabled;
+#endif
 	const cpumask_t			*cpus_ptr;
 	cpumask_t			*user_cpus_ptr;
 	cpumask_t			cpus_mask;
 	void				*migration_pending;
-	unsigned short			migration_disabled;
 #ifndef CONFIG_SCHED_ALT
+	unsigned short			migration_disabled;
 	unsigned short			migration_flags;
 #endif
 
