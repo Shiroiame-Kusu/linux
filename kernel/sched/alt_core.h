@@ -22,6 +22,17 @@ static inline bool is_migration_disabled(const struct task_struct *p)
 
 #define fair_policy(policy)	((policy) == SCHED_NORMAL || (policy) == SCHED_BATCH)
 
+/*
+ * Whether running out of its slice lets equal-priority tasks take over from
+ * @p. A SCHED_FIFO task runs until it blocks, yields or is preempted by a
+ * higher priority, and so does a task PI-boosted into the RT range unless it
+ * is SCHED_RR -- as in mainline, whose task_tick_rt() slices SCHED_RR only.
+ */
+static inline bool task_timesliced(const struct task_struct *p)
+{
+	return !rt_task(p) || p->policy == SCHED_RR;
+}
+
 #define valid_policy(policy)	((policy) <= SCHED_IDLE)
 
 #define task_has_dl_policy(p)	(false)

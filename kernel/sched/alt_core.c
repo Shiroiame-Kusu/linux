@@ -1172,6 +1172,8 @@ void yield_task(struct rq *rq)
 	 * each called sched_yield() ~4.4M times in 2 s for ~1,500 switches.
 	 */
 	p->time_slice = 0;
+	/* Expired even for a task its slice does not expire, see check_curr(). */
+	rq->yielded = true;
 
 	if (!rt_task(p)) {
 		do_sched_yield_type_1(p, rq);
@@ -3729,7 +3731,8 @@ int sched_cgroup_fork(struct task_struct *p, struct kernel_clone_args *kargs)
 	rq->curr->time_slice /= 2;
 	p->time_slice = rq->curr->time_slice;
 #ifdef CONFIG_SCHED_HRTICK
-	if (rq->curr->time_slice < (s64)TICK_NSEC && hrtick_enabled(rq))
+	if (rq->curr->time_slice < (s64)TICK_NSEC && task_timesliced(rq->curr) &&
+	    hrtick_enabled(rq))
 		hrtick_start(rq, rq->curr->time_slice);
 #endif
 
@@ -4698,10 +4701,15 @@ static inline void scheduler_task_tick(struct rq *rq)
 
 	/*
 	 * Tasks have less than RESCHED_NS of time slice left they will be
-	 * rescheduled.
+	 * rescheduled -- unless their slice lets nobody in, in which case a
+	 * reschedule would only renew it.
 	 */
 	if (p->time_slice >= RESCHED_NS)
 		return;
+	if (!task_timesliced(p)) {
+		p->time_slice = sysctl_sched_base_slice;
+		return;
+	}
 	set_tsk_need_resched(p);
 	set_preempt_need_resched();
 }
@@ -5223,7 +5231,13 @@ static __always_inline int check_curr(struct task_struct *p, struct rq *rq)
 		p->time_slice = sysctl_sched_base_slice;
 		sched_task_renew(p, rq);
 
-		return 1;
+		/*
+		 * A SCHED_FIFO task used to be round-robined with its
+		 * equal-priority peers here like any other: it is only
+		 * expired by sched_yield(), which POSIX makes move it behind
+		 * them.
+		 */
+		return task_timesliced(p) || rq->yielded;
 	}
 
 	return 0;
@@ -5773,7 +5787,8 @@ picked:
 	 * parked on this CPU's preempt_list -- so without one, leave the
 	 * expiry to the tick. A peer arriving later gets tick precision.
 	 */
-	if (next->time_slice < (s64)TICK_NSEC && hrtick_enabled(rq) &&
+	if (next->time_slice < (s64)TICK_NSEC && task_timesliced(next) &&
+	    hrtick_enabled(rq) &&
 	    (sched_bits_below(srq->bitmap, task_sched_prio(next) + 1) ||
 	     !is_preempt_list_empty(cpu)))
 		hrtick_start(rq, next->time_slice);
@@ -5941,6 +5956,7 @@ static void __sched notrace __schedule(int sched_mode)
 	}
 
 	expired = check_curr(rq->curr, rq);
+	rq->yielded = false;
 	/*
 	 * After check_curr(): its update_curr() rewrites prev->last_ran, which
 	 * the policy may reuse as the sleep stamp of a blocked task.
