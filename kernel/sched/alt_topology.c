@@ -181,7 +181,8 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 static __always_inline int sched_cpu_promote_level(const int cpu, struct task_struct *p)
 {
 	const int topo = per_cpu(sched_cpu_topo, cpu);
-	int level = (topo & CPU_TOPOLOGY_MASK) - 1, idx;
+	int level = (topo & CPU_TOPOLOGY_MASK) - 1;
+	unsigned long better;
 
 	/* Untyped CPUs have no idle levels to compare; pinned tasks stay. */
 	if (level < 0 || 1 == p->nr_cpus_allowed || is_migration_disabled(p))
@@ -194,8 +195,9 @@ static __always_inline int sched_cpu_promote_level(const int cpu, struct task_st
 		level += 3;
 #endif
 
-	for_each_set_bit(idx, cpu_sched_prio_bitmap, level)
-		if (cpumask_intersects(cpu_sched_prio_mask + idx, p->cpus_ptr))
+	better = sched_bits_below(cpu_sched_prio_bitmap, level);
+	for (; better; better &= better - 1)
+		if (cpumask_intersects(cpu_sched_prio_mask + __ffs(better), p->cpus_ptr))
 			return level;
 
 	return -1;
