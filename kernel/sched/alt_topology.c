@@ -162,137 +162,43 @@ static __always_inline void sched_clear_idle_mask(const unsigned int cpu)
 
 
 /*
- * CPU topology balance type
+ * Slice-expiry promotion: the idle level @cpu would sit at once @p left it,
+ * if a CPU @p may run on is idle at a better one -- a faster core class, or
+ * with SMT a core with no busy sibling -- else -1. pick_next_task() then
+ * switches to the idle task instead of renewing @p here and finish_task()
+ * hands @p over, see finish_task_promote().
+ *
+ * This is what moves a CPU-bound task off a slower core. It used to be done
+ * from the other end: every U/P-core entering idle trylocked the rq of each
+ * busy E-core in turn and, finding one whose task could move, preempted that
+ * task with the stopper. That cost 2.6% of all cycles under a wakeup
+ * ping-pong, which enters idle constantly and found nothing to move; and it
+ * pulled short-running tasks too, which a P-core that is idle for a few
+ * microseconds has no use for. A task that has run a whole slice is the one
+ * worth a cold cache, and its own CPU can tell that for free; one that sleeps
+ * first is placed on the fastest idle core at its next wakeup anyway.
  */
-static DEFINE_PER_CPU(struct balance_callback, active_balance_head);
-
-/* common balance functions */
-static int active_balance_cpu_stop(void *data)
-{
-	struct balance_arg *arg = data;
-	unsigned long flags;
-
-	local_irq_save(flags);
-	arg->active = 0;
-	local_irq_restore(flags);
-
-	return 0;
-}
-
-/* trigger_active_balance - for @cpu */
-static __always_inline int
-trigger_active_balance(const int cpu, struct rq *src_rq, cpumask_t *target_mask)
-{
-	struct rq *rq = cpu_rq(cpu);
-	struct balance_arg *arg;
-	unsigned long flags;
-	struct task_struct *p;
-	int res;
-
-	if (!raw_spin_trylock_irqsave(&rq->lock, flags))
-		return 0;
-
-	arg = &rq->active_balance_arg;
-	p = rq->curr;
-	res = (p != rq->idle) && !srq_has_queued(cpu) && is_preempt_list_empty(cpu) &&	\
-	      !is_migration_disabled(p) && cpumask_intersects(p->cpus_ptr, target_mask) &&	\
-	      !arg->active;
-	if (res)
-		arg->active = 1;
-
-	raw_spin_unlock_irqrestore(&rq->lock, flags);
-
-	if (res) {
-		preempt_disable();
-		raw_spin_unlock(&src_rq->lock);
-
-		stop_one_cpu_nowait(cpu, active_balance_cpu_stop, arg, &rq->active_balance_work);
-
-		preempt_enable();
-		raw_spin_lock(&src_rq->lock);
-	}
-
-	return res;
-}
-
-/* Where this CPU's next cpu_topo_balance() starts looking for a source. */
-static DEFINE_PER_CPU(int, topo_balance_cursor);
-
-static __always_inline bool
-topo_balance_try(const int i, struct rq *rq, cpumask_t *target_mask)
-{
-	if (!trigger_active_balance(i, rq, target_mask))
-		return false;
-
-	per_cpu(topo_balance_cursor, cpu_of(rq)) = (i + 1 < nr_cpu_ids) ? i + 1 : 0;
-	return true;
-}
-
-static __always_inline void cpu_topo_balance(struct rq *rq)
-{
-	int i, cpu = cpu_of(rq);
-	int idx = (per_cpu(sched_cpu_topo, cpu) & CPU_TOPOLOGY_MASK) - 1;
-	cpumask_t *target_mask = cpu_sched_prio_mask + idx;
-	/*
-	 * Resume after the source this CPU stopped last time instead of at
-	 * the lowest-numbered one. That one is also the first E-core wakeup
-	 * placement overflows to, so a fixed start put nearly every active
-	 * balance on it: stopper runs per 10 s measured 1,835 on CPU 8, 633
-	 * on CPU 9 and single digits by CPU 22 on an 8P+16E part.
-	 */
-	int start = per_cpu(topo_balance_cursor, cpu);
-
-#ifdef CONFIG_SCHED_SMT
-	for (int level = 3; level < 6; level++) {
-		if (cpumask_empty(cpu_topo_masks + level))
-			continue;
-
-		for_each_cpu_wrap(i, cpu_topo_masks + level, start) {
-			/* Covers @i itself being idle: @i is in its smt mask. */
-			if (!cpu_active(i) ||
-			    cpumask_intersects(cpu_smt_mask(i), sched_idle_mask))
-				continue;
-			if (topo_balance_try(i, rq, target_mask))
-				return;
-		}
-	}
-#endif /* CONFIG_SCHED_SMT */
-
-	if (2 != idx) {
-		for_each_cpu_wrap(i, sched_ecore_mask, start) {
-			/* Offline CPUs are in no level, idle ones included. */
-			if (!cpu_active(i) || cpumask_test_cpu(i, sched_idle_mask))
-				continue;
-			if (topo_balance_try(i, rq, target_mask))
-				return;
-		}
-	}
-}
-
-static inline void sched_cpu_topology_balance(const unsigned int cpu, struct rq *rq)
+static __always_inline int sched_cpu_promote_level(const int cpu, struct task_struct *p)
 {
 	const int topo = per_cpu(sched_cpu_topo, cpu);
-	switch (topo) {
-	case CPU_TOPOLOGY_DEFAULT:
-		break;
-	case CPU_TOPOLOGY_UCORE:
-	case CPU_TOPOLOGY_PCORE:
-#ifdef CONFIG_SCHED_SMT
-	case CPU_TOPOLOGY_ECORE:
-#endif
-		queue_balance_callback(rq, &per_cpu(active_balance_head, cpu), cpu_topo_balance);
-		break;
-	case CPU_TOPOLOGY_UCORE_SMT:
-	case CPU_TOPOLOGY_PCORE_SMT: /* as same as CPU_TOPOLOGY_SMT */
-	case CPU_TOPOLOGY_ECORE_SMT:
-		int idx = (topo & CPU_TOPOLOGY_MASK) - 1;
+	int level = (topo & CPU_TOPOLOGY_MASK) - 1, idx;
 
-		if (bitmap_empty(cpu_sched_prio_bitmap, idx) &&
-		    cpumask_test_cpu(cpu, cpu_sched_prio_mask + idx))
-			queue_balance_callback(rq, &per_cpu(active_balance_head, cpu),
-					       cpu_topo_balance);
-		break;
-	}
+	/* Untyped CPUs have no idle levels to compare; pinned tasks stay. */
+	if (level < 0 || 1 == p->nr_cpus_allowed || is_migration_disabled(p))
+		return -1;
+
+#ifdef CONFIG_SCHED_SMT
+	/* As sched_set_idle_mask() would file @cpu: with no sibling idle, half. */
+	if (topo > CPU_TOPOLOGY_NONE &&
+	    !cpumask_intersects(cpu_smt_mask(cpu), sched_idle_mask))
+		level += 3;
+#endif
+
+	for_each_set_bit(idx, cpu_sched_prio_bitmap, level)
+		if (cpumask_intersects(cpu_sched_prio_mask + idx, p->cpus_ptr))
+			return level;
+
+	return -1;
 }
 
 /*
