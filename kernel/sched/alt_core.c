@@ -2036,14 +2036,22 @@ static inline void __resched_cpu(const int cpu)
  * kick it without rescanning the priority bitmap; nr_cpu_ids when there is
  * no candidate at all. @skip_cpu (-1 for none) excludes a CPU the caller
  * knows is not a valid target (typically itself).
+ *
+ * Each level is walked through its own mask, one topology ring at a time:
+ * a level holds a handful of CPUs while @p's affinity usually spans all of
+ * them, so walking the affinity and testing each CPU against the level --
+ * as this used to -- visited every CPU of every ring for each level and was
+ * most of the scan's cost (1.5% of all cycles on one line under hackbench).
+ * Both walks visit candidates in the same order, so the CPU chosen is the
+ * same; is_cpu_allowed() is what checks @p's affinity.
  */
 static inline struct rq *
 __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
-		    const cpumask_t *filter, const int skip_cpu, int *kick_cpu)
+		    const int skip_cpu, int *kick_cpu)
 {
 	struct rq *rq;
 	int idx, preempt_idx = SCHED_LEVELS - 1 - sched_prio, cpu = task_cpu(p);
-	const bool filter_test_cpu = cpumask_test_cpu(cpu, filter);
+	const bool try_prev = cpu != skip_cpu && is_cpu_allowed(p, cpu);
 	cpumask_t *end_mask = per_cpu(cpu_affinity_end_mask, cpu);
 
 	*kick_cpu = nr_cpu_ids;
@@ -2059,8 +2067,7 @@ __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
 		 * wakeup_modified_task() park @p on the rq returned here without
 		 * re-checking.
 		 */
-		if (filter_test_cpu && cpu != skip_cpu && cpumask_test_cpu(cpu, prio_mask) &&
-		    is_cpu_allowed(p, cpu)) {
+		if (try_prev && cpumask_test_cpu(cpu, prio_mask)) {
 			rq = cpu_rq(cpu);
 			if (raw_spin_trylock(&rq->lock))
 				return rq;
@@ -2069,15 +2076,16 @@ __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
 		}
 		for (mask = per_cpu(cpu_affinity_masks, cpu); mask < end_mask; mask++) {
 			int i;
-			for_each_cpu_and (i, filter, mask)
-				if (i != skip_cpu && cpumask_test_cpu(i, prio_mask) &&
-				    is_cpu_allowed(p, i)) {
-					rq = cpu_rq(i);
-					if (raw_spin_trylock(&rq->lock))
-						return rq;
-					if (*kick_cpu >= nr_cpu_ids)
-						*kick_cpu = i;
-				}
+
+			for_each_cpu_and (i, prio_mask, mask) {
+				if (i == skip_cpu || !is_cpu_allowed(p, i))
+					continue;
+				rq = cpu_rq(i);
+				if (raw_spin_trylock(&rq->lock))
+					return rq;
+				if (*kick_cpu >= nr_cpu_ids)
+					*kick_cpu = i;
+			}
 		}
 	}
 
@@ -2097,7 +2105,7 @@ static inline struct rq *wakeup_rq_trylock(struct task_struct *p, int *kick_cpu)
 		return rq;
 	}
 
-	return __wakeup_rq_trylock(p, sched_prio, p->cpus_ptr, -1, kick_cpu);
+	return __wakeup_rq_trylock(p, sched_prio, -1, kick_cpu);
 }
 
 /* Queue @p, on no list at the moment, on @rq's preempt_list; holds rq->lock. */
@@ -3998,7 +4006,7 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 			 * exit the moment it is visible in the grq).
 			 */
 			trq = __wakeup_rq_trylock(prev, task_sched_prio(prev),
-						  prev->cpus_ptr, cpu, &kick_cpu);
+						  cpu, &kick_cpu);
 			if (trq && !preempt_handoff_ok(prev, trq)) {
 				raw_spin_unlock(&trq->lock);
 				trq = NULL;
@@ -5252,8 +5260,7 @@ static __always_inline void migrate_preempt_task(struct task_struct *p, const in
 		return;
 	}
 
-	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), p->cpus_ptr,
-					    cpu, &kick_cpu);
+	struct rq *rq = __wakeup_rq_trylock(p, task_sched_prio(p), cpu, &kick_cpu);
 	if (rq && !preempt_handoff_ok(p, rq)) {
 		raw_spin_unlock(&rq->lock);
 		rq = NULL;
