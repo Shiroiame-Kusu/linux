@@ -2310,37 +2310,6 @@ static int migration_cpu_stop(void *data)
 	return 0;
 }
 
-static void migration_stop_failed(struct set_affinity_pending *pending)
-{
-	struct task_struct *p = pending->arg.task;
-	bool complete = false;
-	struct rq_flags rf;
-	struct rq *rq;
-
-	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
-	rq = __task_modify_lock(p, &rf);
-
-	if (pending == p->migration_pending) {
-		pending->stop_pending = false;
-		if (!is_migration_disabled(p)) {
-			p->migration_pending = NULL;
-			complete = true;
-			if (!cpumask_test_cpu(task_cpu(p), &p->cpus_mask)) {
-				if (task_on_rq_preempt(p) || task_on_cpu(p))
-					resched_curr(rq);
-			}
-		}
-	} else {
-		pending->stop_pending = false;
-	}
-
-	__task_modify_unlock(p, &rf);
-	raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
-
-	if (complete)
-		complete_all(&pending->done);
-}
-
 void sched_migrate_enable_finish(struct task_struct *p)
 {
 	struct set_affinity_pending *pending;
@@ -2376,10 +2345,13 @@ void sched_migrate_enable_finish(struct task_struct *p)
 	__task_modify_unlock(p, &rf);
 	raw_spin_unlock_irqrestore(&p->pi_lock, rf.flags);
 
-	if (stop_cpu < nr_cpu_ids &&
-	    !stop_one_cpu_nowait(stop_cpu, migration_cpu_stop,
-				 &pending->arg, &pending->stop_work))
-		migration_stop_failed(pending);
+	/*
+	 * stop_cpu is this CPU, and __migrate_enable() calls us with preemption
+	 * disabled, so its stopper stays enabled until the work is queued.
+	 */
+	if (stop_cpu < nr_cpu_ids)
+		stop_one_cpu_nowait(stop_cpu, migration_cpu_stop,
+				    &pending->arg, &pending->stop_work);
 
 	if (complete)
 		complete_all(&pending->done);
@@ -2448,13 +2420,15 @@ static int affine_move_task(struct rq *rq, struct task_struct *p,
 		if (!stop_pending)
 			pending->stop_pending = true;
 
+		/* Keep task_cpu(p)'s stopper enabled until the work is queued. */
+		preempt_disable();
 		__task_modify_unlock(p, rf);
 		raw_spin_unlock_irqrestore(&p->pi_lock, rf->flags);
 
-		if (!stop_pending &&
-		    !stop_one_cpu_nowait(task_cpu(p), migration_cpu_stop,
-					 &pending->arg, &pending->stop_work))
-			migration_stop_failed(pending);
+		if (!stop_pending)
+			stop_one_cpu_nowait(task_cpu(p), migration_cpu_stop,
+					    &pending->arg, &pending->stop_work);
+		preempt_enable();
 
 		wait_for_completion(&pending->done);
 
@@ -3747,7 +3721,7 @@ out:
 }
 __setup("schedstats=", setup_schedstats);
 
-#ifdef CONFIG_PROC_SYSCTL
+#ifdef CONFIG_SYSCTL
 static int sysctl_schedstats(const struct ctl_table *table, int write, void *buffer,
 		size_t *lenp, loff_t *ppos)
 {
@@ -3767,7 +3741,7 @@ static int sysctl_schedstats(const struct ctl_table *table, int write, void *buf
 		set_schedstats(state);
 	return err;
 }
-#endif /* CONFIG_PROC_SYSCTL */
+#endif /* CONFIG_SYSCTL */
 #endif /* CONFIG_SCHEDSTATS */
 
 #ifdef CONFIG_SYSCTL
