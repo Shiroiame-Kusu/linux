@@ -194,6 +194,8 @@ struct rq {
 	struct task_struct		*stop;
 	struct mm_struct		*prev_mm;
 	bool				block;
+	/* The current task called sched_yield(); consumed by check_curr(). */
+	bool				yielded;
 	/*
 	 * Set by pick_next_task() for finish_task() when the current task's
 	 * slice expired with a better CPU idle: the idle level to beat, or -1.
