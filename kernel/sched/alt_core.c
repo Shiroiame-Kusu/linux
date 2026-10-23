@@ -2152,6 +2152,21 @@ static __always_inline void preempt_list_add_locked(struct task_struct *p, struc
 	if (rq->curr == rq->idle ||
 	    task_sched_prio(p) < READ_ONCE(cpu_prio(cpu)))
 		resched_curr(rq);
+
+	/*
+	 * Publish the CPU at @p's level now, as __schedule() would once it
+	 * runs @p. Until then the CPU still looked idle (or busy with
+	 * something @p outranks), so every waker in that window chose the
+	 * same target, and its pick_preempt_task() had to re-place all but
+	 * one through another full scan each. If @p is not the one run
+	 * after all, __schedule() moves the level on again whether or not
+	 * the CPU switches. We hold this rq->lock, which is all
+	 * update_sched_cpu_prio() asks for. An offline rq is in no level,
+	 * and the level it rejoins at comes from cpu_prio(), so leave that
+	 * tracking its current task.
+	 */
+	if (rq->online && task_sched_prio(p) < READ_ONCE(cpu_prio(cpu)))
+		update_sched_cpu_prio(cpu, task_sched_prio(p));
 }
 
 static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct rq *rq)
@@ -2184,14 +2199,16 @@ static __always_inline void preempt_on_rq_locked(struct task_struct *p, struct r
  * its idle state. The handoff is made only while the target, re-checked under
  * its lock, will run the task promptly: still allowed for it (the scan's
  * unlocked check can go stale), and idle or running something the task
- * outranks.
+ * outranks. Both read off cpu_prio(), which preempt_list_add_locked() also
+ * raises for a task handed over and not yet running -- an idle CPU already
+ * promised to one task is not idle for the next.
  */
 static __always_inline bool preempt_handoff_ok(struct task_struct *p, struct rq *rq)
 {
 	const int cpu = cpu_of(rq);
 
 	return is_cpu_allowed(p, cpu) &&
-	       (rq->curr == rq->idle || task_sched_prio(p) < READ_ONCE(cpu_prio(cpu)));
+	       task_sched_prio(p) < READ_ONCE(cpu_prio(cpu));
 }
 
 static __always_inline void preempt_on_rq(struct task_struct *p, struct rq *rq)
@@ -5525,7 +5542,13 @@ static inline struct task_struct *pick_next_task(const int cpu, struct rq *rq, i
 	struct task_struct *next;
 	bool blocked = rq->block;
 	bool repicked = false, defer_to_grq = true;
-	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO : READ_ONCE(cpu_prio(cpu)) + expired;
+	/*
+	 * Off the task itself, not cpu_prio(): a waker may have raised the
+	 * published level for the task it handed over (which must win here),
+	 * and an expiring task has just been deboosted by check_curr().
+	 */
+	int pick_sched_prio = blocked ? IDLE_TASK_SCHED_PRIO :
+				        task_sched_prio(rq->curr) + expired;
 	int grq_prio;
 
 repick:
@@ -5880,7 +5903,14 @@ picked:
 
 		cpu = cpu_of(rq);
 	} else {
-		if (expired)
+		/*
+		 * Not only after a slice renewal: a waker may have raised the
+		 * level for a task it handed over (preempt_list_add_locked())
+		 * that was then re-placed instead of picked. The idle task's
+		 * level is published by pick_next_task()'s idle-entry
+		 * handshake, never here.
+		 */
+		if (next != rq->idle)
 			update_sched_cpu_prio(cpu, task_sched_prio(next));
 		__balance_callbacks(rq);
 		hrtick_schedule_exit(rq);
