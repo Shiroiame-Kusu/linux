@@ -5762,8 +5762,20 @@ picked:
 	 * reprogram and an extra timer interrupt duplicating the tick's
 	 * job. Stale sub-tick expiries left queued by this gate are
 	 * cancelled in hrtick_schedule_exit().
+	 *
+	 * With HZ=1000 and the 1<<20 ns base slice, "shorter than a tick"
+	 * is any slice 48.6 us into its life, i.e. nearly every pick of a
+	 * task that sleeps and wakes; and such a task nearly always blocks
+	 * first, so the timer is started here only to be cancelled at the
+	 * next switch (3.4% of all cycles in a pinned pipe ping-pong). A
+	 * precise expiry only matters to whoever would take over at it --
+	 * a grq task no worse than @next (expiry admits equals) or a task
+	 * parked on this CPU's preempt_list -- so without one, leave the
+	 * expiry to the tick. A peer arriving later gets tick precision.
 	 */
-	if (next->time_slice < (s64)TICK_NSEC && hrtick_enabled(rq))
+	if (next->time_slice < (s64)TICK_NSEC && hrtick_enabled(rq) &&
+	    (sched_bits_below(srq->bitmap, task_sched_prio(next) + 1) ||
+	     !is_preempt_list_empty(cpu)))
 		hrtick_start(rq, next->time_slice);
 #endif
 	/*printk(KERN_INFO "sched: choose_next_task(%d) next %px\n", cpu, next);*/
