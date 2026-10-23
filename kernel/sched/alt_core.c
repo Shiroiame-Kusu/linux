@@ -1721,6 +1721,30 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 	__set_task_cpu(p, new_cpu);
 }
 
+/*
+ * set_task_cpu() for a task a pick takes out of the grq, split around the
+ * bucket lock. The cpu store must precede the task leaving its bucket -- a
+ * waker that then sees __sched_prio == -1 goes by task_rq(), see
+ * ttwu_runnable() -- but the perf and rseq hooks only have to precede the
+ * task running, so the picker makes them after the unlock: rseq's flag in
+ * particular sits on a line of its own, a cache miss every migrating pick
+ * otherwise took while all the bucket's other pickers waited. Of
+ * set_task_cpu()'s WARNs none can fire here: a grq task is queued, never
+ * migration-disabled, and the CPU picking it is online.
+ */
+static __always_inline void srq_pick_set_cpu(struct task_struct *p, unsigned int new_cpu)
+{
+	trace_sched_migrate_task(p, new_cpu);
+	smp_wmb();
+	WRITE_ONCE(task_thread_info(p)->cpu, new_cpu);
+}
+
+static __always_inline void srq_pick_migrated(struct task_struct *p)
+{
+	perf_event_task_migrate(p);
+	rseq_sched_set_ids_changed(p);
+}
+
 void ___migrate_enable(void)
 {
 	struct task_struct *p = current;
@@ -1779,6 +1803,17 @@ static inline bool is_cpu_allowed(struct task_struct *p, int cpu)
 
 	/* But are allowed during online. */
 	return cpu_online(cpu);
+}
+
+/*
+ * is_cpu_allowed() for a grq task, see pq_any_cpu at SRQ_ENQUEUE_TASK(): one
+ * allowed on every CPU is allowed on any active one, for user tasks and
+ * unbound kthreads alike, without reading its affinity -- another remote
+ * cache line, read under the bucket lock.
+ */
+static __always_inline bool srq_task_allowed(struct task_struct *p, int cpu)
+{
+	return (p->pq_any_cpu && cpu_active(cpu)) || is_cpu_allowed(p, cpu);
 }
 
 static inline void mm_update_cpus_allowed(struct mm_struct *mm, const cpumask_t *affmask);
@@ -5510,14 +5545,14 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		list_for_each_entry(p, &srq->bucket[idx].fifo, pq_fifo) {
 			unsigned long bits;
 
-			if (strand_idx < 0 && is_cpu_allowed(p, cpu))
+			if (strand_idx < 0 && srq_task_allowed(p, cpu))
 				strand_idx = idx;
 
 			for (bits = levels; bits; bits &= bits - 1) {
 				int i;
 
 				for_each_cpu_and(i, p->cpus_ptr, cpu_sched_prio_mask + __ffs(bits)) {
-					if (i == cpu || !is_cpu_allowed(p, i))
+					if (i == cpu || !srq_task_allowed(p, i))
 						continue;
 					kick_cpu = i;
 					break;
@@ -5587,7 +5622,7 @@ static __always_inline int wakeup_srq_task(const int cpu)
 		srq_bucket_refill(srq, idx);							\
 												\
 	list_for_each_entry(p, fifo, pq_fifo)							\
-		if (is_cpu_allowed(p, cpu)) {							\
+		if (srq_task_allowed(p, cpu)) {							\
 			cand = p;								\
 			break;									\
 		}										\
@@ -5602,21 +5637,25 @@ static __always_inline int wakeup_srq_task(const int cpu)
 												\
 		if (p)										\
 			list_for_each_entry_from(p, fifo, pq_fifo)				\
-				if (is_cpu_allowed(p, cpu)) {					\
+				if (srq_task_allowed(p, cpu)) {					\
 					cand = p;						\
 					break;							\
 				}								\
 	}											\
 												\
 	if (cand) {										\
+		const bool migrated = task_cpu(cand) != cpu;					\
+												\
 		list_del_init(&cand->pq_fifo);							\
 		next = cand;									\
-		if (task_cpu(next) != cpu)							\
-			set_task_cpu(next, cpu);						\
+		if (migrated)									\
+			srq_pick_set_cpu(next, cpu);						\
 		WRITE_ONCE(next->__sched_prio, -1);						\
 		this_cpu_dec(grq_nr_queued);							\
 		srq_bucket_bit_update(srq, idx);						\
 		raw_spin_unlock(lock);								\
+		if (migrated)									\
+			srq_pick_migrated(next);						\
 		goto picked;									\
 	}											\
 	/* Nothing runnable here, or a stale bit left by a dequeue-side path. */		\
