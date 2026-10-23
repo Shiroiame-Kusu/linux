@@ -2792,6 +2792,13 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
  * TASK_RUNNING. Otherwise we lost the race, schedule() has happened, and we
  * need to do a full wakeup with enqueue.
  *
+ * A task queued in the grq belongs to no rq: any CPU may pick it, taking
+ * only the bucket lock, run it and have it block under its own rq->lock.
+ * Holding the rq lock of the CPU it last ran on serializes against none of
+ * that, so the lock that does -- the bucket's -- is taken instead: while it
+ * is held and @p is still in that bucket, @p cannot be dequeued, so it
+ * cannot run, so it cannot block before it sees TASK_RUNNING.
+ *
  * Returns: %true when the wakeup is done,
  *          %false otherwise.
  */
@@ -2801,6 +2808,8 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 	int ret = 0;
 
 	for (;;) {
+		int idx;
+
 		if (task_on_rq_preempt(p)) {
 			int wake_cpu = READ_ONCE(p->wake_cpu);
 
@@ -2809,7 +2818,6 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 			if (likely(task_on_rq_preempt(p) &&
 				   wake_cpu == READ_ONCE(p->wake_cpu) &&
 				   rq == task_rq(p))) {
-				update_rq_clock(rq);
 				if (task_sched_prio(p) < READ_ONCE(cpu_prio(cpu_of(rq))))
 					resched_curr(rq);
 				ttwu_do_wakeup(p);
@@ -2817,6 +2825,26 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 				break;
 			}
 			raw_spin_unlock(&rq->lock);
+			continue;
+		}
+
+		if (task_on_rq_queued(p) && !READ_ONCE(p->on_cpu) &&
+		    (idx = READ_ONCE(p->__sched_prio)) >= 0) {
+			raw_spinlock_t *lock = &cpu_srq(0)->bucket[idx].lock;
+
+			raw_spin_lock(lock);
+			if (likely(task_on_rq_queued(p) && !p->on_cpu &&
+				   idx == READ_ONCE(p->__sched_prio))) {
+				/*
+				 * Already queued for the CPUs that may run it,
+				 * whose post-enqueue kick was made; nothing to
+				 * preempt for it here.
+				 */
+				ttwu_do_wakeup(p);
+				raw_spin_unlock(lock);
+				return 1;
+			}
+			raw_spin_unlock(lock);
 			continue;
 		}
 
@@ -2844,8 +2872,16 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 			raw_spin_unlock(&rq->lock);
 			continue;
 		} else if (task_on_rq_queued(p)) {
-			update_rq_clock(rq);
 			if (!task_on_cpu(p)) {
+				/*
+				 * Entered the grq while we waited for this lock
+				 * (finish_task() re-places a preempted task under
+				 * it): that bucket's lock is the one to hold.
+				 */
+				if (READ_ONCE(p->__sched_prio) >= 0) {
+					raw_spin_unlock(&rq->lock);
+					continue;
+				}
 				/*
 				 * When on_rq && !on_cpu the task is preempted, see if
 				 * it should preempt the task that is current now.
