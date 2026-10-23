@@ -1273,6 +1273,18 @@ Enables/disables scheduler statistics. Enabling this feature
 incurs a small amount of overhead in the scheduler but is
 useful for debugging and performance tuning.
 
+sched_ttwu_queue
+================
+
+BMQ CPU scheduler only. What a wakeup does when the task it wakes has
+just blocked and is still being switched out on another CPU: wait for
+that switch to finish, or queue the wakeup on that CPU, which finishes
+it by IPI once the task is off it, so the waker can go on at once.
+
+  0 - Always wait.
+  1 - Queue it when that CPU is switching to idle, otherwise wait.
+  2 - Always queue it. (default)
+
 sched_util_clamp_min
 ====================
 
