@@ -5508,7 +5508,20 @@ repick:
 			raw_spin_unlock(lock);
 		}
 
-		if (idx < pick_sched_prio) {
+		/*
+		 * ... but only wait when something here is owed the CPU: it is
+		 * going idle, or the contended bucket outranks what it runs. A
+		 * CPU whose current task stays runnable and is only offered a
+		 * peer (slice expiry, sched_yield()) keeps that task instead:
+		 * the bucket's lock holder is popping that very FIFO, so the
+		 * peer is being served, and every later bucket is no better.
+		 * Waiting made every yield on every CPU queue on one lock as
+		 * soon as runnable peers outnumbered CPUs: 26 yielding threads
+		 * on 24 CPUs managed 4.7M yields/s against 57.6M for 24, and
+		 * at 48 threads 79% of all cycles spun here.
+		 */
+		if (idx < pick_sched_prio &&
+		    (blocked || idx < task_sched_prio(rq->curr))) {
 			for_each_set_bit_from(idx, srq->bitmap, pick_sched_prio) {
 				raw_spinlock_t	*lock = &srq->bucket[idx].lock;
 
