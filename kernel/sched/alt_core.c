@@ -105,6 +105,15 @@ unsigned int sysctl_sched_base_slice __read_mostly	= (1 << 20);
  */
 int sched_yield_type __read_mostly = 1;
 
+/*
+ * sysctl_sched_ttwu_queue - what a wakeup does when its task is still being
+ * switched out on another CPU, see ttwu_queue_wakelist().
+ * 0: wait for the switch to finish, then place the task.
+ * 1: hand the wakeup to that CPU if it is switching to its idle task.
+ * 2: always hand the wakeup to that CPU. (default)
+ */
+static int sysctl_sched_ttwu_queue __read_mostly = 2;
+
 #ifdef CONFIG_SCHED_SMT
 DEFINE_STATIC_KEY_FALSE(sched_smt_present);
 EXPORT_SYMBOL_GPL(sched_smt_present);
@@ -282,8 +291,8 @@ EXPORT_SYMBOL(__trace_set_current_state);
  * to run next.
  *
  * Task enqueue is also under rq->lock, possibly taken from another CPU.
- * Wakeups from another LLC domain might use an IPI to transfer the enqueue to
- * the local CPU to avoid bouncing the runqueue state around [ see
+ * A wakeup whose task is still being switched out on its CPU might use an IPI
+ * to have that CPU finish the wakeup, instead of waiting for the switch [ see
  * ttwu_queue_wakelist() ]
  *
  * Task wakeup, specifically wakeups that involve migration, are horribly
@@ -2981,49 +2990,32 @@ static int ttwu_runnable(struct task_struct *p, int wake_flags)
 	return ret;
 }
 
+/*
+ * Finish the wakeups ttwu_queue_wakelist() handed to this CPU, each the way
+ * try_to_wake_up() would have finished it: under p->pi_lock, once p->on_cpu
+ * is clear, placing the task wherever the waker would have placed it. Until
+ * then the task is TASK_WAKING and on no runqueue. Everything else that looks
+ * at or changes a sleeping task -- another wakeup, an affinity or policy
+ * change, task_call_func(), the recovery gate in try_to_wake_up() -- does so
+ * under pi_lock, so to all of it this is the waker finishing late.
+ */
 void sched_ttwu_pending(void *arg)
 {
 	struct llist_node *llist = arg;
-	struct rq *rq = this_rq();
 	struct task_struct *p, *t;
-	struct rq_flags rf;
-
-	if (!llist)
-		return;
-
-	rq_lock_irqsave(rq, &rf);
-	update_rq_clock(rq);
 
 	llist_for_each_entry_safe(p, t, llist, wake_entry.llist) {
+		raw_spin_lock(&p->pi_lock);
+
+		/* Switched out here first: IRQs are off until finish_task(). */
 		if (WARN_ON_ONCE(p->on_cpu))
 			smp_cond_load_acquire(&p->on_cpu, !VAL);
 
-		if (WARN_ON_ONCE(task_cpu(p) != cpu_of(rq)))
-			set_task_cpu(p, cpu_of(rq));
+		sched_task_ttwu(p);
+		ttwu_do_activate(p, 0);
 
-		if (p->sched_contributes_to_load)
-			this_cpu_dec(grq_nr_uninterruptible);
-		if (p->in_iowait) {
-			delayacct_blkio_end(p);
-			atomic_dec(&cpu_srq(0)->nr_iowait);
-		}
-		WRITE_ONCE(p->__state, TASK_RUNNING);
-		trace_sched_wakeup(p);
-		preempt_on_rq_locked(p, rq);
+		raw_spin_unlock(&p->pi_lock);
 	}
-
-	/*
-	 * Must be after enqueueing at least once task such that
-	 * idle_cpu() does not observe a false-negative -- if it does,
-	 * it is possible for select_idle_siblings() to stack a number
-	 * of tasks on this CPU during that window.
-	 *
-	 * It is OK to clear ttwu_pending when another task pending.
-	 * We will receive IPI after local IRQ enabled and then enqueue it.
-	 * Since now nr_running > 0, idle_cpu() will always get correct result.
-	 */
-	WRITE_ONCE(rq->ttwu_pending, 0);
-	rq_unlock_irqrestore(rq, &rf);
 }
 
 /*
@@ -3043,73 +3035,36 @@ bool call_function_single_prep_ipi(int cpu)
 }
 
 /*
- * Queue a task on the target CPUs wake_list and wake the CPU via IPI if
- * necessary. The wakee CPU on receipt of the IPI will queue the task
- * via sched_ttwu_wakeup() for activation so the wakee incurs the cost
- * of the wakeup instead of the waker.
+ * @p blocked on @cpu and is still being switched out there, so placing it now
+ * would mean waiting for that switch to finish first (the
+ * smp_cond_load_acquire() in try_to_wake_up()). Under load the switch itself
+ * waits for a contended grq bucket lock in pick_next_task(), and in perf bench
+ * sched messaging wakers spent 3.3-4.5% of all cycles waiting there. Instead,
+ * queue the wakeup on @cpu and let the waker go: @cpu takes the IPI as soon as
+ * it has switched @p out -- its IRQs are off until then -- and
+ * sched_ttwu_pending() finishes the wakeup.
+ *
+ * Unlike mainline's wakelist this is not an enqueue on @cpu: @p is placed the
+ * way the waker would have placed it, on any CPU, so nothing gets stacked on a
+ * busy @cpu. A busy @cpu does pay for the IPI and the placement, out of
+ * whatever it switched to; mode 1 only hands over to a @cpu that is switching
+ * to its idle task, as mainline does, so that only idle time pays.
+ *
+ * Left to the waker: wakeups that ask for the waker's own CPU
+ * (WF_CURRENT_CPU), and CPUs on their way offline.
  */
-static void __ttwu_queue_wakelist(struct task_struct *p, int cpu, int wake_flags)
-{
-	struct rq *rq = cpu_rq(cpu);
-
-	p->sched_remote_wakeup = !!(wake_flags & WF_MIGRATED);
-
-	WRITE_ONCE(rq->ttwu_pending, 1);
-	__smp_call_single_queue(cpu, &p->wake_entry.llist);
-}
-
-static inline bool ttwu_queue_cond(struct task_struct *p, int cpu)
-{
-	int this_cpu = smp_processor_id();
-
-	/*
-	 * Do not complicate things with the async wake_list while the CPU is
-	 * in hotplug state.
-	 */
-	if (!cpu_active(cpu))
-		return false;
-
-	/* Ensure the task will still be allowed to run on the CPU. */
-	if (!cpumask_test_cpu(cpu, p->cpus_ptr))
-		return false;
-
-	/*
-	 * If the CPU does not share cache, then queue the task on the
-	 * remote rqs wakelist to avoid accessing remote data.
-	 */
-	if (!cpus_share_cache(this_cpu, cpu))
-		return true;
-
-	if (cpu == this_cpu)
-		return false;
-
-	/*
-	 * If the wakee cpu is idle, or the task is descheduling and the
-	 * only running task on the CPU, then use the wakelist to offload
-	 * the task activation to the idle (or soon-to-be-idle) CPU as
-	 * the current CPU is likely busy. nr_running is checked to
-	 * avoid unnecessary task stacking.
-	 *
-	 * Note that we can only get here with (wakee) p->on_rq=0,
-	 * p->on_cpu can be whatever, we've done the dequeue, so
-	 * the wakee has been accounted out of ->nr_running.
-	 */
-	if (cpumask_test_cpu(cpu, sched_idle_mask) && !srq_has_queued(cpu) &&
-	    is_preempt_list_empty(cpu))
-		return true;
-
-	return false;
-}
-
 static bool ttwu_queue_wakelist(struct task_struct *p, int cpu, int wake_flags)
 {
-	if (__is_defined(ALT_SCHED_TTWU_QUEUE) && ttwu_queue_cond(p, cpu)) {
-		sched_clock_cpu(cpu); /* Sync clocks across CPUs */
-		__ttwu_queue_wakelist(p, cpu, wake_flags);
-		return true;
-	}
+	const int mode = READ_ONCE(sysctl_sched_ttwu_queue);
 
-	return false;
+	if (!mode || (wake_flags & WF_CURRENT_CPU) || !cpu_active(cpu))
+		return false;
+
+	if (mode == 1 && READ_ONCE(cpu_prio(cpu)) != IDLE_TASK_SCHED_PRIO)
+		return false;
+
+	__smp_call_single_queue(cpu, &p->wake_entry.llist);
+	return true;
 }
 
 void wake_up_if_idle(int cpu)
@@ -3140,28 +3095,6 @@ bool cpus_equal_capacity(int this_cpu, int that_cpu)
 		return true;
 
 	return arch_scale_cpu_capacity(this_cpu) == arch_scale_cpu_capacity(that_cpu);
-}
-
-static inline void ttwu_queue(struct task_struct *p, int wake_flags)
-{
-	/*
-	 * Choosing a wakelist CPU costs is_cpu_allowed() and possibly a walk
-	 * of p->cpus_ptr, which the compiler may not drop even though the
-	 * wakelist itself is compiled out: test_bit() is volatile asm. So
-	 * only choose one when the wakelist exists (see the BUILD_BUG_ON()
-	 * in try_to_wake_up() before enabling it).
-	 */
-	if (__is_defined(ALT_SCHED_TTWU_QUEUE)) {
-		int cpu = task_cpu(p);
-
-		if (!is_cpu_allowed(p, cpu))
-			cpu = queued_task_tick_cpu(p);
-
-		if (cpu < nr_cpu_ids && ttwu_queue_wakelist(p, cpu, wake_flags))
-			return;
-	}
-
-	ttwu_do_activate(p, wake_flags);
 }
 
 /*
@@ -3333,7 +3266,7 @@ bool ttwu_state_match(struct task_struct *p, unsigned int state, int *success)
  * Tries really hard to only take one task_rq(p)->lock for performance.
  * Takes rq->lock in:
  *  - ttwu_runnable()    -- old rq, unavoidable, see comment there;
- *  - ttwu_queue()       -- new rq, for enqueue of the task;
+ *  - ttwu_do_activate() -- new rq, for enqueue of the task;
  *  - psi_ttwu_dequeue() -- much sadness :-( accounting will kill us.
  *
  * As a consequence we race really badly with just about everything. See the
@@ -3395,14 +3328,13 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 			 *   - the MIGRATING (on_rq==2) setters in _task_rq_lock() and
 			 *     __task_modify_lock() run under pi_lock;
 			 *   - the ttwu WAKING window uses __state==TASK_WAKING, not
-			 *     RUNNING, and on_rq==WAKING(11) is never written.
-			 * The lone producer that sets __state=RUNNING before on_rq
-			 * WITHOUT pi_lock is the async wakelist drain
-			 * sched_ttwu_pending(); it is dead in this build
-			 * (ALT_SCHED_TTWU_QUEUE undefined). Trip a build-time guard so
-			 * this recovery is re-audited before that path can ship --
-			 * otherwise a concurrent drain could be misclassified here and
-			 * double-enqueue the same p->pq_node.
+			 *     RUNNING, and on_rq==WAKING(11) is never written;
+			 *   - a wakeup handed to another CPU (ttwu_queue_wakelist())
+			 *     stays TASK_WAKING until sched_ttwu_pending() activates
+			 *     the task there, under pi_lock, as the waker would have.
+			 * Anything new that marks a task RUNNING before it is on a
+			 * runqueue must hold pi_lock as well, or it could be
+			 * misclassified here and the same p->pq_node enqueued twice.
 			 *
 			 * Require on_rq == 0 exactly (not merely !queued && !preempt)
 			 * so MIGRATING/WAKING/any future on_rq encoding cannot slip
@@ -3414,8 +3346,6 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 			 * the smp_rmb() below still routes a task requeued during the
 			 * race through ttwu_runnable() instead of re-enqueueing it.
 			 */
-			BUILD_BUG_ON(__is_defined(ALT_SCHED_TTWU_QUEUE));
-
 			if (READ_ONCE(p->__state) == TASK_RUNNING &&
 			    READ_ONCE(p->on_rq) == 0 &&
 			    !READ_ONCE(p->on_cpu)) {
@@ -3523,7 +3453,7 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 		sched_task_ttwu(p);
 
-		ttwu_queue(p, wake_flags);
+		ttwu_do_activate(p, wake_flags);
 	}
 out:
 	if (success)
@@ -3541,8 +3471,19 @@ static bool __task_needs_rq_lock(struct task_struct *p)
 	 * the task is blocked. Make sure to check @state since ttwu() can drop
 	 * locks at the end, see ttwu_queue_wakelist().
 	 */
-	if (state == TASK_RUNNING || state == TASK_WAKING)
+	if (state == TASK_RUNNING)
 		return true;
+
+	/*
+	 * A wakeup handed to another CPU: the task is on no runqueue, and
+	 * sched_ttwu_pending() needs pi->lock to put it on one, so pi->lock
+	 * holds it there too -- but the CPU it blocked on may still be
+	 * switching it out, and no rq->lock would wait for that here.
+	 */
+	if (state == TASK_WAKING) {
+		smp_cond_load_acquire(&p->on_cpu, !VAL);
+		return false;
+	}
 
 	/*
 	 * Ensure we load p->on_rq after p->__state, otherwise it would be
@@ -3593,7 +3534,7 @@ int task_call_func(struct task_struct *p, task_call_f func, void *arg)
 	/*
 	 * At this point the task is pinned; either:
 	 *  - blocked and we're holding off wakeups      (pi->lock)
-	 *  - woken, and we're holding off enqueue       (rq->lock)
+	 *  - woken, and we're holding off enqueue       (pi->lock)
 	 *  - queued, and we're holding off schedule     (rq->lock or SRQ lock)
 	 *  - running, and we're holding off de-schedule (rq->lock)
 	 *
@@ -3875,6 +3816,15 @@ static const struct ctl_table sched_core_sysctls[] = {
 		.extra2         = SYSCTL_ONE,
 	},
 #endif /* CONFIG_SCHEDSTATS */
+	{
+		.procname	= "sched_ttwu_queue",
+		.data		= &sysctl_sched_ttwu_queue,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_TWO,
+	},
 };
 static int __init sched_core_sysctl_init(void)
 {

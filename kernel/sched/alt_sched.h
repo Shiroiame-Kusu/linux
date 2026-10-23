@@ -215,8 +215,6 @@ struct rq {
 	int cpu;		/* cpu of this runqueue */
 	bool online;
 
-	unsigned int		ttwu_pending;
-
 #ifdef CONFIG_HAVE_SCHED_AVG_IRQ
 	struct sched_avg	avg_irq;
 #endif
@@ -575,7 +573,7 @@ static inline bool idle_rq(struct rq *rq)
 	int cpu = cpu_of(rq);
 
 	return rq->curr == rq->idle && !srq_has_queued(cpu) &&
-	       is_preempt_list_empty(cpu) && !rq->ttwu_pending;
+	       is_preempt_list_empty(cpu);
 }
 
 /**
