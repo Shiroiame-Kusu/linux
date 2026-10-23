@@ -524,16 +524,17 @@ struct sched_run_queue {
 	 * bucket-emptiness transitions. It is also the grq's "anything
 	 * queued?" signal, srq_has_queued(). The exact length lives in
 	 * per-CPU counters (grq_nr_queued), so no enqueue or dequeue RMWs a
-	 * line shared by every CPU to keep it. The (rarer, sleep-path)
-	 * loadavg/iowait counters get a line of their own.
+	 * line shared by every CPU to keep it. The (rarer, IO-sleep path)
+	 * iowait counter gets a line of its own; the loadavg's
+	 * uninterruptible count is per-CPU as well, see nr_uninterruptible().
 	 */
 	DECLARE_BITMAP(bitmap, SCHED_QUEUE_BITS) ____cacheline_aligned;
-	atomic_t		nr_uninterruptible ____cacheline_aligned;
-	atomic_t		nr_iowait;
+	atomic_t		nr_iowait ____cacheline_aligned;
 };
 
 extern struct sched_run_queue grq;
 DECLARE_PER_CPU(int, grq_nr_queued);
+DECLARE_PER_CPU(int, grq_nr_uninterruptible);
 DECLARE_PER_CPU_SHARED_ALIGNED(struct llist_head, preempt_list);
 
 static inline bool is_preempt_list_empty(const int cpu)
@@ -567,10 +568,7 @@ static inline bool srq_has_queued(const int cpu)
 	return READ_ONCE(cpu_srq(cpu)->bitmap[0]) & BITMAP_LAST_WORD_MASK(SCHED_QUEUE_BITS);
 }
 
-static inline unsigned int nr_uninterruptible(void)
-{
-	return raw_atomic_read(&cpu_srq(0)->nr_uninterruptible);
-}
+extern unsigned int nr_uninterruptible(void);
 
 static inline bool idle_rq(struct rq *rq)
 {

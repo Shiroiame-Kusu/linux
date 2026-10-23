@@ -249,7 +249,6 @@ static inline void sched_run_queue_init(struct sched_run_queue *q)
 		INIT_LIST_HEAD(&q->bucket[i].fifo);
 	}
 	bitmap_zero(q->bitmap, SCHED_QUEUE_BITS);
-	atomic_set(&q->nr_uninterruptible, 0);
 	atomic_set(&q->nr_iowait, 0);
 }
 
@@ -1638,7 +1637,7 @@ static void block_task(struct rq *rq, struct task_struct *p)
 	sched_task_deactivate(p, rq);
 
 	if (p->sched_contributes_to_load)
-		atomic_inc(&rq_srq(rq)->nr_uninterruptible);
+		this_cpu_inc(grq_nr_uninterruptible);
 
 	if (p->in_iowait) {
 		atomic_inc(&rq_srq(rq)->nr_iowait);
@@ -2767,7 +2766,7 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 	struct rq *rq;
 
 	if (p->sched_contributes_to_load)
-		atomic_dec(&srq->nr_uninterruptible);
+		this_cpu_dec(grq_nr_uninterruptible);
 
 	if (p->in_iowait) {
 		delayacct_blkio_end(p);
@@ -2968,7 +2967,7 @@ void sched_ttwu_pending(void *arg)
 			set_task_cpu(p, cpu_of(rq));
 
 		if (p->sched_contributes_to_load)
-			atomic_dec(&cpu_srq(0)->nr_uninterruptible);
+			this_cpu_dec(grq_nr_uninterruptible);
 		if (p->in_iowait) {
 			delayacct_blkio_end(p);
 			atomic_dec(&cpu_srq(0)->nr_iowait);
@@ -4500,6 +4499,7 @@ context_switch(struct rq *rq, struct task_struct *prev,
  * threads, total number of context switches performed since bootup.
  */
 DEFINE_PER_CPU(int, grq_nr_queued);
+DEFINE_PER_CPU(int, grq_nr_uninterruptible);
 
 /*
  * Exact grq length, for the few that need a count (nr_running(), loadavg).
@@ -4513,6 +4513,23 @@ static unsigned int grq_nr_queued_sum(void)
 
 	for_each_possible_cpu(cpu)
 		sum += per_cpu(grq_nr_queued, cpu);
+
+	return max(sum, 0);
+}
+
+/*
+ * Tasks in uninterruptible sleep, for the load average. Counted like
+ * grq_nr_queued: up on the CPU a task blocks on, down on the one that wakes
+ * it, summed on demand. As one atomic shared by all CPUs this was a
+ * cross-CPU RMW on every mutex, rwsem, folio-lock and IO sleep and wakeup,
+ * for a reader that samples it every LOAD_FREQ.
+ */
+unsigned int nr_uninterruptible(void)
+{
+	int cpu, sum = 0;
+
+	for_each_possible_cpu(cpu)
+		sum += per_cpu(grq_nr_uninterruptible, cpu);
 
 	return max(sum, 0);
 }
