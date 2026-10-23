@@ -908,6 +908,8 @@ struct task_struct {
 #ifdef CONFIG_SCHED_BMQ
 	int				boost_prio;
 #endif /* CONFIG_SCHED_BMQ */
+	/* Allowed on every CPU when queued in the grq, see SRQ_ENQUEUE_TASK(). */
+	bool				pq_any_cpu;
 	u64				last_ran;
 	s64				time_slice;
 #ifdef CONFIG_SCHED_PDS

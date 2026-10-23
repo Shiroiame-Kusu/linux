@@ -299,11 +299,18 @@ struct task_struct *srq_bucket_refill(struct sched_run_queue *srq, const int idx
 	__found;									\
 })
 
+/*
+ * pq_any_cpu caches, for the picks that inspect @p under the bucket lock, that
+ * it may run on every CPU. A grq task is never migration-disabled (those are
+ * kept on preempt_lists), so its cpus_ptr is its cpus_mask, and any affinity
+ * change dequeues and re-enqueues it through here.
+ */
 #define SRQ_ENQUEUE_TASK(srq, p, __modify_body__)		\
 {								\
 	int sched_prio = task_sched_prio(p);			\
 								\
 	WRITE_ONCE(p->__sched_prio, sched_prio);		\
+	p->pq_any_cpu = p->nr_cpus_allowed >= nr_cpu_ids;	\
 	__modify_body__						\
 	llist_add(&p->pq_node, &(srq)->arrivals[sched_prio].head);	\
 	srq_bucket_bit_announce(srq, sched_prio);		\
