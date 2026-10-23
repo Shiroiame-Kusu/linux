@@ -2061,7 +2061,10 @@ __wakeup_rq_trylock(struct task_struct *p, const int sched_prio,
 	 * favored U-core idle as well: the U-core runs ~4% faster, the
 	 * P-core still holds the task's L1/L2. Preferring the U-core level
 	 * made 86% of the idle desktop's 7.2k migrations/s P<->U and U<->U
-	 * hops. An E-core task is still placed on the fastest idle core.
+	 * hops. Tasks that use the speed -- ones that run a whole slice --
+	 * are still moved to an idle U-core at slice expiry, see
+	 * sched_cpu_promote_level(), and an E-core task is still placed on
+	 * the fastest idle core.
 	 */
 	if (try_prev && SCHED_PCORE_IDLE_LEVEL < preempt_idx &&
 	    cpumask_test_cpu(cpu, cpu_sched_prio_mask + SCHED_PCORE_IDLE_LEVEL)) {
@@ -3985,14 +3988,62 @@ static __always_inline void kick_preempt_cpu(const int cpu);
  * and resumes when the kthread is done. If the kthread keeps the CPU for a
  * whole slice instead, pick_preempt_task() re-places @prev from there, so the
  * wait is bounded by one slice. The stopper is excluded: when it preempts,
- * it is to move @prev (active balance, affinity changes, hotplug).
+ * it is to move @prev (affinity changes, hotplug). So is the idle task, which
+ * only replaces a runnable @prev to promote it (finish_task_promote()).
  */
 static __always_inline bool preempted_by_percpu_kthread(struct rq *rq, struct task_struct *prev)
 {
 	struct task_struct *curr = rq->curr;
 
-	return curr != rq->stop && (curr->flags & PF_KTHREAD) &&
+	return curr != rq->stop && curr != rq->idle && (curr->flags & PF_KTHREAD) &&
 	       1 == curr->nr_cpus_allowed && is_cpu_allowed(prev, cpu_of(rq));
+}
+
+/*
+ * @prev's slice ran out while a CPU at a better idle level was free, so
+ * pick_next_task() switched to the idle task rather than renew it here (see
+ * sched_cpu_promote_level()). Hand it to such a CPU. If they have all been
+ * taken meanwhile, put it back on this CPU's preempt_list for the idle task's
+ * reschedule to take straight off again: no trip through the grq, where any
+ * CPU could take it, and no migration to a CPU no better than this one.
+ *
+ * pick_next_task() published this CPU idle before switching but skipped its
+ * look at the grq, so take that look here, now that @prev is placed: a task
+ * that queued before the idle level was visible has nobody else to kick it.
+ */
+static __always_inline void finish_task_promote(struct task_struct *prev, struct rq *rq)
+{
+	const int cpu = cpu_of(rq);
+	const int level = rq->promote_level;
+	struct rq *trq;
+	int kick_cpu;
+
+	rq->promote_level = -1;
+
+	trq = __wakeup_rq_trylock(prev, SCHED_LEVELS - 1 - level, cpu, &kick_cpu);
+	if (trq && !preempt_handoff_ok(prev, trq)) {
+		raw_spin_unlock(&trq->lock);
+		trq = NULL;
+	}
+
+	if (trq) {
+		preempt_list_add_locked(prev, trq);
+		raw_spin_unlock(&trq->lock);
+		if (srq_has_queued(cpu))
+			resched_curr(rq);
+		return;
+	}
+
+	WRITE_ONCE(prev->wake_cpu, cpu);
+	WRITE_ONCE(prev->__sched_prio, -1);
+	WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
+	ASSERT_EXCLUSIVE_WRITER(prev->on_rq);
+	llist_add(&prev->pq_node, per_cpu_ptr(&preempt_list, cpu));
+	resched_curr(rq);
+
+	/* Not idle after all: claim the level, as preempt_list_add_locked() does. */
+	if (task_sched_prio(prev) < READ_ONCE(cpu_prio(cpu)))
+		update_sched_cpu_prio(cpu, task_sched_prio(prev));
 }
 
 static inline void finish_task(struct task_struct *prev, struct rq *rq)
@@ -4019,8 +4070,10 @@ static inline void finish_task(struct task_struct *prev, struct rq *rq)
 
 		WARN_ON_ONCE(READ_ONCE(prev->__sched_prio) != -1);
 
-		if (1 == prev->nr_cpus_allowed || is_migration_disabled(prev) ||
-		    preempted_by_percpu_kthread(rq, prev)) {
+		if (unlikely(rq->promote_level >= 0)) {
+			finish_task_promote(prev, rq);
+		} else if (1 == prev->nr_cpus_allowed || is_migration_disabled(prev) ||
+			   preempted_by_percpu_kthread(rq, prev)) {
 			WRITE_ONCE(prev->wake_cpu, cpu);
 			WRITE_ONCE(prev->__sched_prio, -1);
 			WRITE_ONCE(prev->on_rq, TASK_ON_RQ_PREEMPT);
@@ -5625,6 +5678,21 @@ repick:
 	}
 
 	next = blocked ? idle : rq->curr;
+
+	/*
+	 * Nothing here beats the current task, whose slice just ran out: if a
+	 * better CPU for it is idle, let it go there -- switch to the idle
+	 * task and finish_task() hands it over. See sched_cpu_promote_level().
+	 */
+	if (expired && next != idle && rq->online) {
+		int level = sched_cpu_promote_level(cpu, next);
+
+		if (level >= 0) {
+			rq->promote_level = level;
+			next = idle;
+		}
+	}
+
 	if (next == idle) {
 		if (rq->online) {
 			/*
@@ -5641,7 +5709,13 @@ repick:
 			update_sched_cpu_prio(cpu, IDLE_TASK_SCHED_PRIO);
 			smp_mb__after_atomic();
 
-			if (srq_has_queued(cpu)) {
+			/*
+			 * A promotion must not re-pick: anything found now would
+			 * run ahead of the task being promoted, which may yet
+			 * have to come back. finish_task_promote() takes this
+			 * look at the grq instead, once that task is placed.
+			 */
+			if (rq->promote_level < 0 && srq_has_queued(cpu)) {
 				int sidx = wakeup_srq_task(cpu);
 
 				/*
@@ -5660,8 +5734,7 @@ repick:
 					pick_sched_prio = SCHED_QUEUE_BITS;
 					goto repick;
 				}
-			} else
-				sched_cpu_topology_balance(cpu, rq);
+			}
 		}
 
 		schedstat_inc(rq->sched_goidle);
@@ -7444,7 +7517,7 @@ void __init sched_init(void)
 		rq->online = false;
 		rq->cpu = i;
 
-		rq->active_balance_arg.active = 0;
+		rq->promote_level = -1;
 
 #ifdef CONFIG_NO_HZ_COMMON
 		INIT_CSD(&rq->nohz_csd, nohz_csd_func, rq);

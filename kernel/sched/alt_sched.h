@@ -181,10 +181,6 @@ struct balance_callback {
 	void (*func)(struct rq *rq);
 };
 
-struct balance_arg {
-	int			active;
-};
-
 /*
  * This is the main, per-CPU runqueue data structure.
  * This data should only be modified by the local cpu.
@@ -198,6 +194,11 @@ struct rq {
 	struct task_struct		*stop;
 	struct mm_struct		*prev_mm;
 	bool				block;
+	/*
+	 * Set by pick_next_task() for finish_task() when the current task's
+	 * slice expired with a better CPU idle: the idle level to beat, or -1.
+	 */
+	int				promote_level;
 
 	/* switch count */
 	u64 nr_switches;
@@ -218,10 +219,7 @@ struct rq {
 	struct sched_avg	avg_irq;
 #endif
 
-	struct balance_arg	active_balance_arg		____cacheline_aligned;
-	struct cpu_stop_work	active_balance_work;
-
-	struct balance_callback	*balance_callback;
+	struct balance_callback	*balance_callback		____cacheline_aligned;
 
 #ifdef CONFIG_HOTPLUG_CPU
 	struct rcuwait		hotplug_wait;
