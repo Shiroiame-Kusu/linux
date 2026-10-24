@@ -3999,6 +3999,12 @@ static __always_inline bool preempted_by_percpu_kthread(struct rq *rq, struct ta
  * pick_next_task() published this CPU idle before switching but skipped its
  * look at the grq, so take that look here, now that @prev is placed: a task
  * that queued before the idle level was visible has nobody else to kick it.
+ * The same goes for this CPU's preempt_list: pick_preempt_task() put the
+ * pinned and migration-disabled tasks it would not run ahead of @prev back on
+ * it without a kick, and with @prev gone they are this CPU's to run. Left
+ * there, they waited for the tick backstop in sched_tick() or, once the idle
+ * CPU stopped its tick, for its next interrupt; ksoftirqd waiting there is
+ * what "NOHZ tick-stop error: local softirq work is pending" reported.
  */
 static __always_inline void finish_task_promote(struct task_struct *prev, struct rq *rq)
 {
@@ -4018,7 +4024,7 @@ static __always_inline void finish_task_promote(struct task_struct *prev, struct
 	if (trq) {
 		preempt_list_add_locked(prev, trq);
 		raw_spin_unlock(&trq->lock);
-		if (srq_has_queued(cpu))
+		if (srq_has_queued(cpu) || !is_preempt_list_empty(cpu))
 			resched_curr(rq);
 		return;
 	}
