@@ -2804,6 +2804,24 @@ static inline void ttwu_do_wakeup(struct task_struct *p)
 	trace_sched_wakeup(p);
 }
 
+/*
+ * Start @p's wait for a CPU, which sched_info_arrive() turns into the run delay
+ * of /proc/PID/schedstat, delay accounting and /proc/schedstat. Mainline and
+ * PRJC stamp it in enqueue_task(); the grq and the preempt_lists have no such
+ * hook, so LFBMQ never stamped a wakeup and only counted the waits that follow
+ * a preemption, which sched_info_depart() stamps -- a task that blocks and
+ * wakes showed no delay at all. There is no rq to take the clock of here (an
+ * idle target's rq->clock can be milliseconds old), so this uses the waker's
+ * local_clock(): sched_clock_cpu(), like every rq->clock.
+ */
+static __always_inline void sched_info_wakeup(struct task_struct *p)
+{
+#ifdef CONFIG_SCHED_INFO
+	if (!p->sched_info.last_queued)
+		p->sched_info.last_queued = local_clock();
+#endif
+}
+
 static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 {
 	struct sched_run_queue *srq = cpu_srq(0);
@@ -2818,6 +2836,7 @@ static inline void ttwu_do_activate(struct task_struct *p, int wake_flags)
 	}
 
 	trace_sched_wakeup(p);
+	sched_info_wakeup(p);
 
 	if ((wake_flags & WF_CURRENT_CPU) && cpumask_test_cpu(smp_processor_id(), p->cpus_ptr)) {
 		rq = this_rq();
@@ -3850,6 +3869,7 @@ void wake_up_new_task(struct task_struct *p)
 	raw_spin_lock_irqsave(&p->pi_lock, flags);
 
 	trace_sched_wakeup_new(p);
+	sched_info_wakeup(p);
 
 	rq = wakeup_rq_trylock(p, &kick_cpu);
 
@@ -4268,6 +4288,16 @@ prepare_task_switch(struct rq *rq, struct task_struct *prev,
 		    struct task_struct *next)
 {
 	kcov_prepare_switch(prev);
+#ifdef CONFIG_SCHED_INFO
+	/*
+	 * @next's wait was stamped by whichever CPU woke or preempted it, and a
+	 * grq pick can run after this CPU read rq->clock for this switch: the
+	 * stamp may be later than rq_clock(), and sched_info_arrive()'s unsigned
+	 * delta would wrap to ~2^64 (seen on an IRQ thread). Count it as zero.
+	 */
+	if (unlikely((s64)(next->sched_info.last_queued - rq_clock(rq)) > 0))
+		next->sched_info.last_queued = rq_clock(rq);
+#endif
 	sched_info_switch(rq, prev, next);
 	perf_event_task_sched_out(prev, next);
 	fire_sched_out_preempt_notifiers(prev, next);
