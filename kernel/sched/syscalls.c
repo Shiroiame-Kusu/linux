@@ -1526,7 +1526,8 @@ EXPORT_SYMBOL(yield);
 int __sched yield_to(struct task_struct *p, bool preempt)
 {
 #ifdef CONFIG_SCHED_ALT
-	return 0;
+	/* @p runs on this CPU, never preempts on its own: @preempt is moot. */
+	return yield_to_task(p);
 #else /* !CONFIG_SCHED_ALT */
 	struct task_struct *curr;
 	struct rq *rq, *p_rq;

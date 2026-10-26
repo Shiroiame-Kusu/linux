@@ -456,6 +456,7 @@ DEFINE_LOCK_GUARD_1(task_rq_lock, struct task_struct,
 		    struct rq *rq; struct rq_flags rf)
 
 extern void yield_task(struct rq *rq);
+extern int yield_to_task(struct task_struct *p);
 
 DECLARE_STATIC_KEY_FALSE(sched_smt_present);
 

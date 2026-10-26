@@ -71,6 +71,17 @@ static inline void do_sched_yield_type_1(struct task_struct *p, struct rq *rq)
 }
 
 /*
+ * The level yield_task() leaves @p at -- RT tasks keep theirs, the rest drop
+ * to the bottom of their range (do_sched_yield_type_1()) -- without applying
+ * it, for yield_to_task() to decide with before it commits to the yield.
+ */
+static inline int task_sched_prio_yielded(const struct task_struct *p)
+{
+	return (p->prio < MIN_NORMAL_PRIO)? (p->prio >> 2) :
+		MIN_SCHED_NORMAL_PRIO + (p->prio + MAX_PRIORITY_ADJ - MIN_NORMAL_PRIO) / 2;
+}
+
+/*
  * While @p runs, ->last_ran is a clock_task stamp of its own rq, which is what
  * update_curr() needs. clock_task is useless across CPUs though: it excludes
  * each CPU's cumulative IRQ and steal time, so two CPUs' clock_task drift apart

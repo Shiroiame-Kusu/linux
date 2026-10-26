@@ -114,6 +114,14 @@ int sched_yield_type __read_mostly = 1;
  */
 static int sysctl_sched_ttwu_queue __read_mostly = 2;
 
+/*
+ * sysctl_sched_yield_to - what yield_to() does for a task waiting for a CPU,
+ * which is how KVM yields to a preempted vCPU, see yield_to_task().
+ * 0: nothing, yield_to() fails without yielding.
+ * 1: run the task next on the caller's CPU, in the caller's place. (default)
+ */
+static int sysctl_sched_yield_to __read_mostly = 1;
+
 #ifdef CONFIG_SCHED_SMT
 DEFINE_STATIC_KEY_FALSE(sched_smt_present);
 EXPORT_SYMBOL_GPL(sched_smt_present);
@@ -3844,6 +3852,15 @@ static const struct ctl_table sched_core_sysctls[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_TWO,
 	},
+	{
+		.procname	= "sched_yield_to",
+		.data		= &sysctl_sched_yield_to,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= SYSCTL_ONE,
+	},
 };
 static int __init sched_core_sysctl_init(void)
 {
@@ -5837,6 +5854,110 @@ picked:
 #endif
 	/*printk(KERN_INFO "sched: choose_next_task(%d) next %px\n", cpu, next);*/
 	return next;
+}
+
+/*
+ * yield_to() for KVM's directed yield: a vCPU spinning on a lock -- a
+ * pause-loop exit, the KVM_HC_SCHED_YIELD hypercall, a Hyper-V long spin
+ * wait -- yields to a vCPU it may be waiting for, one that was preempted
+ * and waits for a CPU, quite possibly holding that lock or next in line for
+ * it. The old stub returned 0, so the spinner went back to spinning while
+ * that vCPU queued.
+ *
+ * Mainline makes @p its runqueue's next pick and reschedules @p's CPU. The
+ * grq has no per-CPU queue to put @p at the front of, so the caller hands
+ * over its own CPU instead: @p moves to this CPU's preempt_list and the
+ * caller yields as sched_yield() does. Only the turn changes hands, not
+ * priority. The pick after the yield runs @p if @p is no worse than the
+ * caller once the yield has deboosted it (the expiry admits equals) and no
+ * worse than anything waiting in the grq (ties go to the list). A worse @p
+ * is refused outright. If something strictly better waits in the grq, it
+ * takes the CPU whatever happens to @p, so the caller just yields and @p
+ * keeps its place in its bucket rather than being moved there only to lose.
+ * The grq bitmap is read racily; it only chooses between the two.
+ *
+ * A grq task can always be moved (none is migration-disabled), and one
+ * already on this CPU's preempt_list needs no move. One on another CPU's
+ * list is left there: it is pinned, migration-disabled, or about to run
+ * there (handed over, or resuming after a per-CPU kthread).
+ *
+ * Return: 1 if the caller has yielded, to @p unless something better came
+ * first; 0 if not; -ESRCH if @p does not wait for a CPU and nothing else
+ * does either -- mainline's "both runqueues hold one task", on which KVM
+ * soon stops looking for another vCPU to yield to.
+ */
+int yield_to_task(struct task_struct *p)
+{
+	struct sched_run_queue *srq = cpu_srq(0);
+	struct task_struct *curr = current;
+	bool handoff = false;
+	unsigned long flags;
+	int cpu, idx, prio, ret = 0;
+	struct rq *rq;
+
+	/* With sched_yield() disabled there is no yield to hand over. */
+	if (!READ_ONCE(sysctl_sched_yield_to) || !sched_yield_type || p == curr)
+		return 0;
+
+	/*
+	 * pi_lock keeps @p's affinity and priority stable and holds off its
+	 * wakeups and the modify paths. A pick can still take it out of the
+	 * grq meanwhile, which the bucket lock excludes; nothing but this
+	 * CPU's own pick takes a task off this CPU's preempt_list, and this
+	 * CPU is busy here with interrupts off.
+	 */
+	raw_spin_lock_irqsave(&p->pi_lock, flags);
+	rq = this_rq();
+	cpu = cpu_of(rq);
+	prio = task_sched_prio(p);
+
+	idx = READ_ONCE(p->__sched_prio);
+	if (task_on_rq_queued(p) && !p->on_cpu && idx >= 0) {
+		if (!is_cpu_allowed(p, cpu) || prio > task_sched_prio_yielded(curr))
+			goto out;
+
+		handoff = !sched_bits_below(srq->bitmap, prio);
+		if (handoff) {
+			raw_spinlock_t *lock = &srq->bucket[idx].lock;
+			bool dequeued;
+
+			/* As __task_modify_lock() takes a grq task off its bucket. */
+			raw_spin_lock(lock);
+			dequeued = task_on_rq_queued(p) && !p->on_cpu &&
+				   idx == READ_ONCE(p->__sched_prio) &&
+				   SRQ_DEQUEUE_TASK(srq, p, {
+					WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
+				   });
+			raw_spin_unlock(lock);
+			/* Picked meanwhile, or the enqueue race SRQ_DEQUEUE_TASK() allows. */
+			if (!dequeued)
+				goto out;
+		}
+	} else if (task_on_rq_preempt(p) && READ_ONCE(p->wake_cpu) == cpu) {
+		if (!preempt_task_can_run_on(p, cpu) || prio > task_sched_prio_yielded(curr))
+			goto out;
+	} else {
+		if (!task_on_rq_preempt(p) && !srq_has_queued(cpu) &&
+		    is_preempt_list_empty(cpu))
+			ret = -ESRCH;
+		goto out;
+	}
+
+	raw_spin_lock(&rq->lock);
+	/* Yield first: the handoff publishes @p's level if it outranks. */
+	yield_task(rq);
+	if (handoff)
+		preempt_list_add_locked(p, rq);
+	schedstat_inc(rq->yld_count);
+	raw_spin_unlock(&rq->lock);
+	ret = 1;
+out:
+	raw_spin_unlock_irqrestore(&p->pi_lock, flags);
+
+	if (ret > 0)
+		schedule();
+
+	return ret;
 }
 
 /*
