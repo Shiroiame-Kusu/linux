@@ -4595,13 +4595,17 @@ unsigned int nr_running(void)
  * - from a thread that is bound to a single CPU
  *
  * - in a loop with very short iterations (e.g. a polling loop)
+ *
+ * Here that means nothing is parked on this CPU's preempt_list and nothing
+ * waits in the grq, which any CPU may take. This used to also require the
+ * CPU to be at the idle level, which only the idle task ever is: KVM's halt
+ * polling (kvm_vcpu_can_poll()) gave up after one look.
  */
 bool single_task_running(void)
 {
 	const int cpu = cpu_of(raw_rq());
 
-	return cpumask_test_cpu(cpu, sched_idle_mask) &&
-	       !srq_has_queued(cpu) && is_preempt_list_empty(cpu);
+	return !srq_has_queued(cpu) && is_preempt_list_empty(cpu);
 }
 EXPORT_SYMBOL(single_task_running);
 
