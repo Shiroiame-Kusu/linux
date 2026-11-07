@@ -1,6 +1,6 @@
 # Simplified PKGBUILD for pre-configured kernel source
 # Original: CachyOS linux-cachyos
-_pkgsuffix="cachyos-lfbmq-hakuu-tlto-expr"
+_pkgsuffix="cachyos-lfbmq-hakuu-tlto-pve"
 pkgbase="linux-$_pkgsuffix"
 _major=7.3
 _minor=6
@@ -8,7 +8,7 @@ pkgver=${_major}.${_minor}
 _stable=${_major}.${_minor}
 _srcname=linux-${_stable}
 pkgrel=1
-pkgdesc='Linux CachyOS Kernel (pre-configured build) by Hakuu'
+pkgdesc='Linux CachyOS Kernel (pre-configured build for Proxmox VE hosts) by Hakuu'
 arch=('x86_64')
 url="https://github.com/CachyOS/linux-cachyos"
 license=('GPL-2.0-only')
