@@ -198,3 +198,6 @@ sphinx_*/
 /pkg*
 /version*
 /*.log
+
+# Outputs of build-deb.sh in the top directory
+/*.deb
