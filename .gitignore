@@ -103,7 +103,6 @@ modules.order
 #
 # pacman files (make pacman-pkg)
 #
-/PKGBUILD
 /pacman/
 
 #
@@ -193,3 +192,8 @@ sphinx_*/
 
 # bc language scripts (not LLVM bitcode)
 !kernel/time/timeconst.bc
+
+# Outputs of the PKGBUILD build in the top directory
+/localversion*
+/pkg*
+/version*
